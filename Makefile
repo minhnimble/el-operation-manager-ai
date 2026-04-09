@@ -1,6 +1,9 @@
 .PHONY: dev up down migrate seed test lint
 
 dev:
+	streamlit run streamlit_app.py
+
+api:
 	uvicorn app.main:app --reload --port 8000
 
 up:

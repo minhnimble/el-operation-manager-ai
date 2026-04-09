@@ -38,13 +38,14 @@ USER_SCOPES = [
 
 
 def build_auth_url(state: str) -> str:
+    # Prefix with "slack:" so the callback page can tell Slack apart from GitHub
     scopes = ",".join(USER_SCOPES)
     return (
         f"{SLACK_OAUTH_URL}"
         f"?client_id={settings.slack_client_id}"
         f"&user_scope={scopes}"
-        f"&state={state}"
-        f"&redirect_uri={settings.app_base_url}/auth/slack/callback"
+        f"&state=slack:{state}"
+        f"&redirect_uri={settings.app_base_url}"
     )
 
 

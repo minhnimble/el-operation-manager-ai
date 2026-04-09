@@ -28,6 +28,9 @@ ENV/
 .env.*
 !.env.example
 
+# Streamlit secrets
+.streamlit/secrets.toml
+
 # pytest
 .pytest_cache/
 .coverage

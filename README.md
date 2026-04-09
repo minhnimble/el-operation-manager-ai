@@ -62,23 +62,21 @@ cp .env.example .env
 Open `.env` and fill in:
 
 ```env
-# Slack — from api.slack.com/apps
+# Slack OAuth app (Sign in with Slack — no bot, no event subscriptions needed)
+# Create at api.slack.com/apps → OAuth & Permissions → User Token Scopes
 SLACK_CLIENT_ID=...
 SLACK_CLIENT_SECRET=...
 
-# GitHub — from github.com/settings/developers
+# GitHub OAuth app — github.com/settings/developers
 GITHUB_CLIENT_ID=...
 GITHUB_CLIENT_SECRET=...
 
-# Anthropic — from console.anthropic.com
+# Anthropic — console.anthropic.com
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Your app's public base URL
-# For local development use your ngrok URL (see below)
+# Your app's public base URL (use your ngrok URL for local development)
 APP_BASE_URL=https://your-ngrok-url.ngrok.io
 ```
-
-> `SLACK_SIGNING_SECRET` is not required — this app does not receive Slack webhook events.
 
 ### 3. Start infrastructure
 
@@ -108,9 +106,10 @@ make seed
 
 Open 3 terminals:
 
-**Terminal 1 — API server**
+**Terminal 1 — Streamlit UI**
 ```bash
 make dev
+# opens at http://localhost:8501
 ```
 
 **Terminal 2 — Celery worker** (processes background sync jobs)
@@ -123,14 +122,7 @@ make worker
 make beat
 ```
 
-Or run everything together with Docker Compose:
-
-```bash
-docker-compose up
-```
-
-The API will be available at `http://localhost:8000`.
-Interactive API docs at `http://localhost:8000/docs`.
+> The FastAPI backend (`make api`) is optional — only needed if you want the raw REST API alongside the UI.
 
 ---
 
@@ -187,65 +179,44 @@ Copy the **Client ID** and **Client Secret** into `.env`.
 
 ---
 
-## Local Development with ngrok
+## Local Development — No ngrok Needed
 
-OAuth callbacks require a public HTTPS URL. Use ngrok to expose your local server:
+Deploy to **[Streamlit Community Cloud](https://streamlit.io/cloud)** (free) to get a permanent public HTTPS URL. Use that URL as the OAuth callback in your Slack and GitHub app settings — no ngrok or tunneling required.
 
-```bash
-ngrok http 8000
-```
+### Deploy to Streamlit Cloud
 
-Copy the `https://xxxx.ngrok.io` URL and:
-1. Set it as `APP_BASE_URL` in `.env`
-2. Update the redirect URL in your Slack app settings
-3. Update the callback URL in your GitHub OAuth app settings
+1. Push the repo to GitHub
+2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app** → select your repo
+3. Set **Main file path** to `streamlit_app.py`
+4. Under **Settings → Secrets**, paste the contents of `.streamlit/secrets.toml.example` with your values filled in
+5. Copy your app URL (e.g. `https://yourapp.streamlit.app`) into:
+   - `APP_BASE_URL` in Streamlit secrets
+   - Slack app redirect URL
+   - GitHub OAuth callback URL
+
+> For a pure local setup without Streamlit Cloud, you can still use ngrok (`ngrok http 8501`) but it is not required.
 
 ---
 
 ## Usage
 
-### 1. Connect Slack
+Open the app at `http://localhost:8501` (or your Streamlit Cloud URL).
 
-Visit this URL in your browser to authorize Slack access:
+### 1. Connect Accounts
 
-```
-http://localhost:8000/auth/slack
-```
+Go to **🔗 Connect Accounts** and click **Sign in with Slack**. After authorizing, click **Connect GitHub**. Both flows redirect back to the app automatically.
 
-Authorize the app. Your user token is stored and used to pull your joined channel messages.
+### 2. Sync Data
 
-### 2. Connect GitHub
+Go to **🔄 Sync Data**, set how many days to backfill, and click **Sync Slack** and **Sync GitHub**. Jobs run in the background via Celery — check back in a minute or two.
 
-After connecting Slack, link your GitHub account by visiting:
+### 3. Generate a Work Report
 
-```
-http://localhost:8000/auth/github?slack_user_id=UXXXXXXX&slack_team_id=TXXXXXXX
-```
+Go to **📊 Work Report**, select a team member, choose a date range, and click **Generate Report**. Toggle **AI insights** on to get Claude-powered work classification and leadership summary.
 
-Replace `UXXXXXXX` and `TXXXXXXX` with your Slack user ID and team ID (visible in the response from step 1). An initial 30-day sync will kick off automatically in the background.
+### 4. View Team
 
-### 3. Backfill Slack Channel History
-
-Trigger a backfill of all your joined public channels (up to 30 days):
-
-```bash
-curl -X POST "http://localhost:8000/api/sync/slack/UXXXXXXX?team_id=TXXXXXXX&days_back=30"
-```
-
-### 4. Generate a Work Report
-
-```bash
-curl -X POST http://localhost:8000/api/work-report \
-  -H "Content-Type: application/json" \
-  -d '{
-    "slack_user_id": "UXXXXXXX",
-    "slack_team_id": "TXXXXXXX",
-    "days_back": 7,
-    "include_ai": true
-  }'
-```
-
-Or use the interactive docs at `http://localhost:8000/docs`.
+Go to **👥 Team Overview** to see all connected users and their Slack/GitHub link status.
 
 ---
 
