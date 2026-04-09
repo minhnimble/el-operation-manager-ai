@@ -1,10 +1,8 @@
 """
-Slack Ingester — pulls messages from Slack and stores them as raw SlackMessages.
+Slack Ingester — pulls messages from Slack using a user OAuth token.
 
-Handles:
-- backfill via conversations.history
-- real-time event processing
-- rate-limit-aware pagination
+Uses conversations.history to backfill channels the user is a member of.
+No bot app or event subscriptions required.
 """
 
 import logging
@@ -17,7 +15,7 @@ from sqlalchemy import select
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.models.raw_data import SlackMessage
-from app.models.installation import SlackInstallation
+from app.models.slack_token import SlackUserToken
 
 logger = logging.getLogger(__name__)
 
@@ -25,17 +23,15 @@ STANDUP_CHANNEL_KEYWORDS = {"standup", "stand-up", "daily", "scrum"}
 
 
 def _is_standup_channel(channel_name: str) -> bool:
-    name_lower = channel_name.lower()
-    return any(kw in name_lower for kw in STANDUP_CHANNEL_KEYWORDS)
+    return any(kw in channel_name.lower() for kw in STANDUP_CHANNEL_KEYWORDS)
 
 
 class SlackIngester:
-    def __init__(self, bot_token: str, team_id: str):
-        self.bot_token = bot_token
+    def __init__(self, user_token: str, team_id: str):
         self.team_id = team_id
         self._client = httpx.AsyncClient(
             base_url="https://slack.com/api",
-            headers={"Authorization": f"Bearer {bot_token}"},
+            headers={"Authorization": f"Bearer {user_token}"},
             timeout=30.0,
         )
 
@@ -48,18 +44,26 @@ class SlackIngester:
         resp.raise_for_status()
         data = resp.json()
         if not data.get("ok"):
-            raise RuntimeError(f"Slack API error: {data.get('error')}")
+            raise RuntimeError(f"Slack API error [{endpoint}]: {data.get('error')}")
         return data
 
-    async def get_public_channels(self) -> list[dict]:
+    async def get_joined_channels(self) -> list[dict]:
+        """Return all public channels the authenticated user is a member of."""
         channels = []
         cursor = None
         while True:
-            params: dict = {"types": "public_channel", "limit": 200, "exclude_archived": "true"}
+            params: dict = {
+                "types": "public_channel",
+                "exclude_archived": "true",
+                "limit": 200,
+            }
             if cursor:
                 params["cursor"] = cursor
             data = await self._get("conversations.list", params)
-            channels.extend(data["channels"])
+            # Filter to channels the user has joined
+            channels.extend(
+                ch for ch in data["channels"] if ch.get("is_member")
+            )
             cursor = data.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
@@ -71,7 +75,6 @@ class SlackIngester:
         oldest: float | None = None,
         latest: float | None = None,
     ) -> AsyncIterator[dict]:
-        """Paginate through a channel's message history."""
         cursor = None
         while True:
             params: dict = {"channel": channel_id, "limit": 200}
@@ -86,7 +89,7 @@ class SlackIngester:
                 data = await self._get("conversations.history", params)
             except RuntimeError as e:
                 if "not_in_channel" in str(e) or "channel_not_found" in str(e):
-                    logger.warning("Bot not in channel %s, skipping", channel_id)
+                    logger.warning("Cannot access channel %s, skipping", channel_id)
                     return
                 raise
 
@@ -102,29 +105,30 @@ class SlackIngester:
         db: AsyncSession,
         channel_id: str,
         channel_name: str,
+        slack_user_id: str,
         oldest: datetime | None = None,
     ) -> int:
-        """Backfill a channel's history into SlackMessage table. Returns count saved."""
+        """Backfill a channel into SlackMessage table. Returns count saved."""
         is_standup = _is_standup_channel(channel_name)
         oldest_ts = oldest.timestamp() if oldest else None
         saved = 0
 
         async for msg in self.iter_channel_messages(channel_id, oldest=oldest_ts):
-            if msg.get("subtype") in {"bot_message", "channel_join", "channel_leave"}:
+            subtype = msg.get("subtype")
+            if subtype in {"bot_message", "channel_join", "channel_leave", "channel_purpose"}:
                 continue
             user_id = msg.get("user")
             if not user_id:
                 continue
 
             ts = msg.get("ts", "")
-            # Deduplicate by message_ts
+
             existing = await db.execute(
                 select(SlackMessage).where(SlackMessage.message_ts == ts)
             )
             if existing.scalar_one_or_none():
                 continue
 
-            timestamp = datetime.utcfromtimestamp(float(ts))
             thread_ts = msg.get("thread_ts")
             is_reply = thread_ts is not None and thread_ts != ts
 
@@ -139,7 +143,7 @@ class SlackIngester:
                 is_standup_channel=is_standup,
                 is_thread_reply=is_reply,
                 raw_payload=msg,
-                timestamp=timestamp,
+                timestamp=datetime.utcfromtimestamp(float(ts)),
             )
             db.add(record)
             saved += 1
@@ -153,13 +157,16 @@ class SlackIngester:
         return data["user"]
 
 
-async def get_or_create_slack_ingester(
-    db: AsyncSession, team_id: str
+async def get_slack_ingester(
+    db: AsyncSession, slack_user_id: str, team_id: str
 ) -> SlackIngester | None:
     result = await db.execute(
-        select(SlackInstallation).where(SlackInstallation.team_id == team_id)
+        select(SlackUserToken).where(
+            SlackUserToken.slack_user_id == slack_user_id,
+            SlackUserToken.slack_team_id == team_id,
+        )
     )
-    installation = result.scalar_one_or_none()
-    if not installation:
+    token_record = result.scalar_one_or_none()
+    if not token_record:
         return None
-    return SlackIngester(bot_token=installation.bot_token, team_id=team_id)
+    return SlackIngester(user_token=token_record.access_token, team_id=team_id)

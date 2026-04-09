@@ -1,9 +1,10 @@
 """
 Celery tasks for data ingestion.
 
-- trigger_backfill: backfill all public Slack channels for a team
+- trigger_backfill: backfill all joined Slack channels for a user
 - trigger_github_sync: sync GitHub activity for a single user
 - sync_github_all_users: nightly sweep of all linked users
+- sync_slack_all_users: nightly Slack backfill (incremental)
 """
 
 import asyncio
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta
 
 from app.tasks.celery_app import celery_app
 from app.database import AsyncSessionLocal
-from app.models.installation import SlackInstallation
+from app.models.slack_token import SlackUserToken
 from app.models.user import UserGitHubLink
 from app.ingestion.slack_ingester import SlackIngester
 from app.ingestion.github_ingester import GitHubIngester
@@ -26,34 +27,41 @@ def _run(coro):
 
 
 @celery_app.task(bind=True, max_retries=3, name="app.tasks.ingestion_tasks.trigger_backfill")
-def trigger_backfill(self, *, team_id: str, requested_by: str, days_back: int = 30):
-    """Backfill all public Slack channels for a workspace."""
-    logger.info("Starting backfill for team %s (requested by %s)", team_id, requested_by)
+def trigger_backfill(
+    self,
+    *,
+    slack_user_id: str,
+    team_id: str,
+    days_back: int = 30,
+):
+    """Backfill all joined Slack channels for a single user."""
+    logger.info("Starting Slack backfill for user %s (team %s)", slack_user_id, team_id)
     try:
-        _run(_async_backfill(team_id=team_id, days_back=days_back))
+        _run(_async_backfill(slack_user_id=slack_user_id, team_id=team_id, days_back=days_back))
     except Exception as exc:
-        logger.exception("Backfill failed for team %s", team_id)
+        logger.exception("Backfill failed for user %s", slack_user_id)
         raise self.retry(exc=exc, countdown=60)
 
 
-async def _async_backfill(team_id: str, days_back: int) -> None:
+async def _async_backfill(slack_user_id: str, team_id: str, days_back: int) -> None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(SlackInstallation).where(SlackInstallation.team_id == team_id)
+            select(SlackUserToken).where(
+                SlackUserToken.slack_user_id == slack_user_id,
+                SlackUserToken.slack_team_id == team_id,
+            )
         )
-        installation = result.scalar_one_or_none()
-        if not installation:
-            logger.error("No installation found for team %s", team_id)
+        token_record = result.scalar_one_or_none()
+        if not token_record:
+            logger.error("No Slack token for user %s", slack_user_id)
             return
 
-        ingester = SlackIngester(bot_token=installation.bot_token, team_id=team_id)
+        ingester = SlackIngester(user_token=token_record.access_token, team_id=team_id)
         try:
-            channels = await ingester.get_public_channels()
+            channels = await ingester.get_joined_channels()
             oldest = datetime.utcnow() - timedelta(days=days_back)
 
             for channel in channels:
-                if not channel.get("is_member"):
-                    continue
                 channel_id = channel["id"]
                 channel_name = channel.get("name", "")
                 try:
@@ -61,10 +69,14 @@ async def _async_backfill(team_id: str, days_back: int) -> None:
                         db=db,
                         channel_id=channel_id,
                         channel_name=channel_name,
+                        slack_user_id=slack_user_id,
                         oldest=oldest,
                     )
                     await db.commit()
-                    logger.info("Backfilled %d messages from #%s", count, channel_name)
+                    logger.info(
+                        "Backfilled %d messages from #%s for user %s",
+                        count, channel_name, slack_user_id,
+                    )
                 except Exception as e:
                     logger.warning("Failed to backfill #%s: %s", channel_name, e)
                     await db.rollback()
@@ -80,7 +92,6 @@ def trigger_github_sync(
     slack_team_id: str,
     days_back: int = 30,
 ):
-    """Sync GitHub activity for a single user."""
     logger.info("Syncing GitHub for user %s (team %s)", slack_user_id, slack_team_id)
     try:
         _run(_async_github_sync(
@@ -128,11 +139,10 @@ async def _async_github_sync(
 
 @celery_app.task(name="app.tasks.ingestion_tasks.sync_github_all_users")
 def sync_github_all_users():
-    """Nightly task: sync GitHub for all linked users."""
-    _run(_async_sync_all_users())
+    _run(_async_sync_all_github())
 
 
-async def _async_sync_all_users() -> None:
+async def _async_sync_all_github() -> None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(UserGitHubLink).where(
@@ -145,7 +155,25 @@ async def _async_sync_all_users() -> None:
         trigger_github_sync.delay(
             slack_user_id=link.slack_user_id,
             slack_team_id=link.slack_team_id,
-            days_back=1,  # Daily incremental
+            days_back=1,
         )
-
     logger.info("Queued GitHub sync for %d users", len(links))
+
+
+@celery_app.task(name="app.tasks.ingestion_tasks.sync_slack_all_users")
+def sync_slack_all_users():
+    _run(_async_sync_all_slack())
+
+
+async def _async_sync_all_slack() -> None:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(SlackUserToken))
+        tokens = result.scalars().all()
+
+    for token in tokens:
+        trigger_backfill.delay(
+            slack_user_id=token.slack_user_id,
+            team_id=token.slack_team_id,
+            days_back=1,  # incremental daily
+        )
+    logger.info("Queued Slack backfill for %d users", len(tokens))

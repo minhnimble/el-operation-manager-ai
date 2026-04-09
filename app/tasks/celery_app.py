@@ -25,14 +25,18 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
 )
 
-# Scheduled tasks
 celery_app.conf.beat_schedule = {
     # Normalize raw data every 15 minutes
     "normalize-all-teams": {
         "task": "app.tasks.normalization_tasks.normalize_all_teams",
         "schedule": crontab(minute="*/15"),
     },
-    # Sync GitHub for all linked users daily at 2am UTC
+    # Incremental Slack sync for all users — daily at 1am UTC
+    "sync-slack-all-users": {
+        "task": "app.tasks.ingestion_tasks.sync_slack_all_users",
+        "schedule": crontab(hour=1, minute=0),
+    },
+    # Incremental GitHub sync for all users — daily at 2am UTC
     "sync-github-all-users": {
         "task": "app.tasks.ingestion_tasks.sync_github_all_users",
         "schedule": crontab(hour=2, minute=0),

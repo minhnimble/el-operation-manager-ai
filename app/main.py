@@ -1,21 +1,18 @@
 """
 FastAPI application entry point.
 
-Mounts:
-  - Slack Bolt ASGI handler at /slack/events + /slack/install + /slack/oauth_redirect
-  - FastAPI router for all other routes
+No Slack bot required — uses Sign in with Slack (user OAuth) to
+query Slack data on behalf of authenticated users.
 """
 
 import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from slack_bolt.adapter.fastapi import SlackRequestHandler
 
 from app.config import get_settings
 from app.database import create_tables
 from app.api.routes import router
-from app.slack.app import bolt_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,26 +35,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Slack Bolt
-slack_handler = SlackRequestHandler(bolt_app)
-
-
-@app.post("/slack/events")
-async def slack_events(req):
-    return await slack_handler.handle(req)
-
-
-@app.get("/slack/install")
-async def slack_install(req):
-    return await slack_handler.handle(req)
-
-
-@app.get("/slack/oauth_redirect")
-async def slack_oauth_redirect(req):
-    return await slack_handler.handle(req)
-
-
-# Mount API routes
 app.include_router(router)
 
 

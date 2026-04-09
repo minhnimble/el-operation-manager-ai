@@ -3,14 +3,18 @@ FastAPI routes.
 
 Endpoints:
   GET  /health
-  GET  /slack/install        — Slack OAuth start
-  GET  /slack/oauth_redirect — Slack OAuth callback
-  GET  /auth/github/callback — GitHub OAuth callback
-  POST /api/work-report      — programmatic report generation
-  GET  /api/users            — list opted-in users for a team
+  GET  /auth/slack              — Slack OAuth start (Sign in with Slack)
+  GET  /auth/slack/callback     — Slack OAuth callback
+  GET  /auth/github             — GitHub OAuth start
+  GET  /auth/github/callback    — GitHub OAuth callback
+  POST /api/work-report         — generate a work report (JSON)
+  POST /api/sync/slack/{user}   — trigger Slack backfill for a user
+  POST /api/sync/github/{user}  — trigger GitHub sync for a user
+  GET  /api/users               — list users for a team
 """
 
 import logging
+import secrets
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -21,24 +25,72 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.config import get_settings
-from app.models.user import User, UserGitHubLink
+from app.models.user import User
+from app.models.slack_token import SlackUserToken
+from app.slack.oauth import build_auth_url, exchange_code, save_slack_token
 from app.github.oauth import link_github_to_user
 from app.analytics.report_builder import build_work_report
-from app.tasks.ingestion_tasks import trigger_github_sync, trigger_backfill
+from app.tasks.ingestion_tasks import trigger_backfill, trigger_github_sync
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 router = APIRouter()
 
 
-# ─── Health ─────────────────────────────────────────────────────────────────
+# ─── Health ──────────────────────────────────────────────────────────────────
 
 @router.get("/health")
 async def health():
     return {"status": "ok", "version": "0.1.0"}
 
 
-# ─── GitHub OAuth ────────────────────────────────────────────────────────────
+# ─── Slack OAuth ─────────────────────────────────────────────────────────────
+
+@router.get("/auth/slack")
+async def slack_auth_start(team_id: str = Query(default="")):
+    """Redirect user to Slack authorization page."""
+    state = f"{team_id}:{secrets.token_urlsafe(16)}"
+    return RedirectResponse(url=build_auth_url(state=state))
+
+
+@router.get("/auth/slack/callback")
+async def slack_auth_callback(
+    code: str = Query(...),
+    state: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Slack redirects here after user authorizes."""
+    try:
+        token_data = await exchange_code(code)
+        token_record = await save_slack_token(db, token_data)
+        return JSONResponse({
+            "message": "Slack account connected successfully.",
+            "slack_user_id": token_record.slack_user_id,
+            "team": token_record.slack_team_name,
+        })
+    except Exception as e:
+        logger.exception("Slack OAuth callback failed")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ─── GitHub OAuth ─────────────────────────────────────────────────────────────
+
+@router.get("/auth/github")
+async def github_auth_start(
+    slack_user_id: str = Query(...),
+    slack_team_id: str = Query(...),
+):
+    """Redirect user to GitHub authorization page."""
+    state = f"{slack_team_id}:{slack_user_id}"
+    github_oauth_url = (
+        f"https://github.com/login/oauth/authorize"
+        f"?client_id={settings.github_client_id}"
+        f"&scope=read:user,repo"
+        f"&state={state}"
+        f"&redirect_uri={settings.app_base_url}/auth/github/callback"
+    )
+    return RedirectResponse(url=github_oauth_url)
+
 
 @router.get("/auth/github/callback")
 async def github_oauth_callback(
@@ -46,7 +98,6 @@ async def github_oauth_callback(
     state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """GitHub sends user here after authorization."""
     try:
         parts = state.split(":")
         if len(parts) != 2:
@@ -60,7 +111,6 @@ async def github_oauth_callback(
             code=code,
         )
 
-        # Kick off initial GitHub sync
         trigger_github_sync.delay(
             slack_user_id=slack_user_id,
             slack_team_id=slack_team_id,
@@ -68,7 +118,7 @@ async def github_oauth_callback(
         )
 
         return JSONResponse({
-            "message": f"GitHub account @{link.github_login} linked successfully!",
+            "message": f"GitHub account @{link.github_login} linked successfully.",
             "github_login": link.github_login,
         })
     except Exception as e:
@@ -76,7 +126,7 @@ async def github_oauth_callback(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# ─── API ─────────────────────────────────────────────────────────────────────
+# ─── API ──────────────────────────────────────────────────────────────────────
 
 class WorkReportRequest(BaseModel):
     slack_user_id: str
@@ -128,6 +178,21 @@ async def list_users(
     ]
 
 
+@router.post("/api/sync/slack/{slack_user_id}")
+async def sync_slack(
+    slack_user_id: str,
+    team_id: str = Query(...),
+    days_back: int = Query(30),
+):
+    """Trigger a Slack backfill for a single user's joined channels."""
+    trigger_backfill.delay(
+        slack_user_id=slack_user_id,
+        team_id=team_id,
+        days_back=days_back,
+    )
+    return {"queued": True, "user": slack_user_id}
+
+
 @router.post("/api/sync/github/{slack_user_id}")
 async def sync_github(
     slack_user_id: str,
@@ -140,9 +205,3 @@ async def sync_github(
         days_back=days_back,
     )
     return {"queued": True, "user": slack_user_id}
-
-
-@router.post("/api/backfill/{team_id}")
-async def backfill(team_id: str, days_back: int = Query(30)):
-    trigger_backfill.delay(team_id=team_id, requested_by="api", days_back=days_back)
-    return {"queued": True, "team_id": team_id}
