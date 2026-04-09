@@ -41,9 +41,6 @@ coverage.xml
 # ruff
 .ruff_cache/
 
-# Alembic
-migrations/versions/*.py
-
 # Logs
 *.log
 logs/
