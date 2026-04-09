@@ -74,8 +74,8 @@ GITHUB_CLIENT_SECRET=...
 # Anthropic — console.anthropic.com
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Your app's public base URL (use your ngrok URL for local development)
-APP_BASE_URL=https://your-ngrok-url.ngrok.io
+# Your Streamlit Cloud app URL (e.g. https://yourapp.streamlit.app)
+APP_BASE_URL=https://yourapp.streamlit.app
 ```
 
 ### 3. Start infrastructure
@@ -179,11 +179,9 @@ Copy the **Client ID** and **Client Secret** into `.env`.
 
 ---
 
-## Local Development — No ngrok Needed
+## Deploying to Streamlit Cloud
 
-Deploy to **[Streamlit Community Cloud](https://streamlit.io/cloud)** (free) to get a permanent public HTTPS URL. Use that URL as the OAuth callback in your Slack and GitHub app settings — no ngrok or tunneling required.
-
-### Deploy to Streamlit Cloud
+Deploy to **[Streamlit Community Cloud](https://streamlit.io/cloud)** (free) to get a permanent public HTTPS URL. Use that URL as the OAuth callback in your Slack and GitHub app settings.
 
 1. Push the repo to GitHub
 2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app** → select your repo
@@ -193,8 +191,6 @@ Deploy to **[Streamlit Community Cloud](https://streamlit.io/cloud)** (free) to 
    - `APP_BASE_URL` in Streamlit secrets
    - Slack app redirect URL
    - GitHub OAuth callback URL
-
-> For a pure local setup without Streamlit Cloud, you can still use ngrok (`ngrok http 8501`) but it is not required.
 
 ---
 
