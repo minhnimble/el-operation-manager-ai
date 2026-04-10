@@ -12,7 +12,7 @@ Built for Engineering Managers, Tech Leads, and CTOs who want to reduce manual s
 - Pulls standup messages and channel activity from channels you're a member of
 - Pulls commits, PRs, reviews, and issues from GitHub
 - Normalizes everything into a unified `WorkUnit` model
-- Generates structured work reports via a REST API
+- Generates structured work reports via a Streamlit UI
 - Uses Claude AI to classify work items and produce leadership insights
 
 ---
@@ -21,7 +21,7 @@ Built for Engineering Managers, Tech Leads, and CTOs who want to reduce manual s
 
 | Layer | Technology |
 |---|---|
-| Web framework | FastAPI + Uvicorn |
+| UI | Streamlit |
 | Database | PostgreSQL (SQLAlchemy async) |
 | Cache / Queue | Redis + Celery |
 | Slack integration | Slack SDK — Sign in with Slack (user OAuth) |
@@ -33,7 +33,7 @@ Built for Engineering Managers, Tech Leads, and CTOs who want to reduce manual s
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.13+
 - Docker + Docker Compose
 - A Slack OAuth app (see setup below — no bot or event subscriptions needed)
 - A GitHub OAuth app
@@ -48,9 +48,9 @@ Built for Engineering Managers, Tech Leads, and CTOs who want to reduce manual s
 ```bash
 git clone <repo-url>
 cd el-operation-manager-ai
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 ### 2. Configure environment
@@ -75,6 +75,7 @@ GITHUB_CLIENT_SECRET=...
 ANTHROPIC_API_KEY=sk-ant-...
 
 # Your Streamlit Cloud app URL (e.g. https://yourapp.streamlit.app)
+# For local dev, use http://localhost:8501
 APP_BASE_URL=https://yourapp.streamlit.app
 ```
 
@@ -122,13 +123,11 @@ make worker
 make beat
 ```
 
-> The FastAPI backend (`make api`) is optional — only needed if you want the raw REST API alongside the UI.
-
 ---
 
 ## Slack App Setup
 
-This app uses **Sign in with Slack** — there is no bot, no event subscriptions, and no real-time webhook handling. Users authorize the app once and their token is used to pull channel history on demand.
+This app uses **Sign in with Slack** — no bot, no event subscriptions, no webhooks. Users authorize once and their token is used to pull channel history on demand.
 
 ### 1. Create a Slack App
 
@@ -151,18 +150,19 @@ identity.email
 
 ### 3. Add Redirect URL
 
-Under **OAuth & Permissions → Redirect URLs**, add:
+Under **OAuth & Permissions → Redirect URLs**, add your app's root URL:
 
 ```
-https://your-app-url/auth/slack/callback
+https://yourapp.streamlit.app
 ```
+
+> OAuth callbacks are handled by the Streamlit app at the root URL via query parameters — no `/callback` path needed.
 
 ### 4. Copy credentials to `.env`
 
-From the **Basic Information** page, copy:
-- `App ID` → not needed
-- `Client ID` → `SLACK_CLIENT_ID`
-- `Client Secret` → `SLACK_CLIENT_SECRET`
+From the **Basic Information** page:
+- **Client ID** → `SLACK_CLIENT_ID`
+- **Client Secret** → `SLACK_CLIENT_SECRET`
 
 ---
 
@@ -172,8 +172,10 @@ Go to **[github.com/settings/developers](https://github.com/settings/developers)
 
 | Field | Value |
 |---|---|
-| Homepage URL | `https://your-app-url` |
-| Authorization callback URL | `https://your-app-url/auth/github/callback` |
+| Homepage URL | `https://yourapp.streamlit.app` |
+| Authorization callback URL | `https://yourapp.streamlit.app` |
+
+> Same as Slack — callbacks land on the root URL and are detected via the `state` query parameter.
 
 Copy the **Client ID** and **Client Secret** into `.env`.
 
@@ -181,7 +183,7 @@ Copy the **Client ID** and **Client Secret** into `.env`.
 
 ## Deploying to Streamlit Cloud
 
-Deploy to **[Streamlit Community Cloud](https://streamlit.io/cloud)** (free) to get a permanent public HTTPS URL. Use that URL as the OAuth callback in your Slack and GitHub app settings.
+Deploy to **[Streamlit Community Cloud](https://streamlit.io/cloud)** (free) to get a permanent public HTTPS URL. Use that URL in your Slack and GitHub OAuth app settings.
 
 1. Push the repo to GitHub
 2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app** → select your repo
@@ -216,22 +218,6 @@ Go to **👥 Team Overview** to see all connected users and their Slack/GitHub l
 
 ---
 
-## API Reference
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Health check |
-| `GET` | `/auth/slack` | Start Slack OAuth (Sign in with Slack) |
-| `GET` | `/auth/slack/callback` | Slack OAuth callback |
-| `GET` | `/auth/github` | Start GitHub OAuth |
-| `GET` | `/auth/github/callback` | GitHub OAuth callback |
-| `POST` | `/api/work-report` | Generate a work report (JSON) |
-| `GET` | `/api/users?team_id=` | List opted-in users for a team |
-| `POST` | `/api/sync/slack/{user_id}?team_id=` | Trigger Slack backfill for a user |
-| `POST` | `/api/sync/github/{user_id}?team_id=` | Trigger GitHub sync for a user |
-
----
-
 ## Running Tests
 
 Requires a running PostgreSQL instance. Create the test database first:
@@ -251,8 +237,14 @@ make test
 ## Project Structure
 
 ```
+streamlit_app.py               # Main UI + OAuth callback handler
+pages/
+├── 1_Connect.py               # Sign in with Slack + GitHub linking
+├── 2_Work_Report.py           # Work report UI with charts
+├── 3_Team_Overview.py         # Team connection status
+└── 4_Sync.py                  # Manual Slack + GitHub sync triggers
 app/
-├── main.py                    # FastAPI app entry point
+├── main.py                    # Optional FastAPI app (REST API)
 ├── config.py                  # Settings (pydantic-settings + .env)
 ├── database.py                # SQLAlchemy async engine + session
 ├── models/
@@ -276,7 +268,7 @@ app/
 ├── github/
 │   └── oauth.py               # GitHub OAuth exchange + user linking
 ├── api/
-│   └── routes.py              # All FastAPI route definitions
+│   └── routes.py              # FastAPI route definitions (optional)
 └── tasks/                     # Celery background tasks
     ├── celery_app.py          # Celery app + beat schedule
     ├── ingestion_tasks.py     # Slack backfill + GitHub sync tasks

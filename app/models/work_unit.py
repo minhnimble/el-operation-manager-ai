@@ -90,8 +90,8 @@ class WorkUnit(Base):
     ai_extracted_items: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
     ai_confidence: Mapped[float | None] = mapped_column(nullable=True)
 
-    # Raw metadata blob
-    metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Raw metadata blob — named 'extra_data' to avoid conflict with SQLAlchemy's reserved 'metadata'
+    extra_data: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, nullable=True)
 
     def __repr__(self) -> str:
         return (

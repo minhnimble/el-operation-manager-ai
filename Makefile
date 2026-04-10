@@ -3,14 +3,17 @@
 dev:
 	streamlit run streamlit_app.py
 
+tunnel:
+	cloudflared tunnel --url localhost:8501
+
 api:
 	uvicorn app.main:app --reload --port 8000
 
 up:
-	docker-compose up -d db redis
+	docker compose up -d db redis
 
 down:
-	docker-compose down
+	docker compose down
 
 migrate:
 	alembic upgrade head

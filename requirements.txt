@@ -9,7 +9,7 @@ plotly==5.24.1
 
 # Database
 sqlalchemy[asyncio]==2.0.36
-asyncpg==0.29.0
+asyncpg==0.30.0
 alembic==1.13.3
 
 # Cache / Queue

@@ -66,7 +66,7 @@ async def normalize_slack_messages(
             slack_channel_id=msg.channel_id,
             slack_message_ts=msg.message_ts,
             timestamp=msg.timestamp,
-            metadata={
+            extra_data={
                 "channel_name": msg.channel_name,
                 "thread_ts": msg.thread_ts,
             },
@@ -115,7 +115,7 @@ async def normalize_github_activities(
             github_repo=act.repo_full_name,
             github_ref_id=act.ref_id,
             timestamp=act.activity_at,
-            metadata=act.raw_payload,
+            extra_data=act.raw_payload,
         )
         db.add(work_unit)
 
