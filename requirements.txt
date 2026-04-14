@@ -8,7 +8,7 @@ streamlit==1.40.0
 plotly==5.24.1
 
 # Database
-sqlalchemy[asyncio]==2.0.36
+sqlalchemy[asyncio]==2.0.41
 asyncpg==0.30.0
 alembic==1.13.3
 

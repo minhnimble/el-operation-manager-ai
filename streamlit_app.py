@@ -9,7 +9,15 @@ use that URL as the OAuth callback in your Slack and GitHub app settings.
 """
 
 import asyncio
+import os
 import streamlit as st
+
+# Inject Streamlit Cloud secrets into os.environ before any app imports.
+# Locally the app reads from .env; on Streamlit Cloud it reads from st.secrets.
+# pydantic-settings picks up whichever is present via os.environ.
+for _key, _val in st.secrets.items():
+    if isinstance(_val, str):
+        os.environ.setdefault(_key.upper(), _val)
 
 from app.database import AsyncSessionLocal
 from app.slack.oauth import exchange_code, save_slack_token

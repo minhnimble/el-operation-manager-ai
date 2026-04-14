@@ -5,7 +5,12 @@ Manually trigger Slack backfill and GitHub sync for the current user.
 Background jobs are processed by the Celery worker.
 """
 
+import os
 import streamlit as st
+
+for _key, _val in st.secrets.items():
+    if isinstance(_val, str):
+        os.environ.setdefault(_key.upper(), _val)
 
 from app.tasks.ingestion_tasks import trigger_backfill, trigger_github_sync
 

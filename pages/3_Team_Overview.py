@@ -5,7 +5,12 @@ Shows all opted-in users and their connection status.
 """
 
 import asyncio
+import os
 import streamlit as st
+
+for _key, _val in st.secrets.items():
+    if isinstance(_val, str):
+        os.environ.setdefault(_key.upper(), _val)
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal

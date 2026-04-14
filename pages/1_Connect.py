@@ -7,8 +7,13 @@ where the code exchange is completed.
 """
 
 import asyncio
+import os
 import secrets
 import streamlit as st
+
+for _key, _val in st.secrets.items():
+    if isinstance(_val, str):
+        os.environ.setdefault(_key.upper(), _val)
 from sqlalchemy import select
 
 from app.config import get_settings
