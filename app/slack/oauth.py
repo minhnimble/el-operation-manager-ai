@@ -1,11 +1,12 @@
 """
-Slack user OAuth flow — Sign in with Slack.
+Slack user OAuth flow — Sign in with Slack (OAuth v2).
 
 Flow:
   1. User visits /auth/slack  → redirect to Slack authorization page
-  2. Slack redirects to /auth/slack/callback?code=...
+  2. Slack redirects back with ?code=...
   3. Exchange code for user access token
-  4. Store token → use it to query Slack APIs on behalf of the user
+  4. Call users.info to get display name / email (requires users:read)
+  5. Store token → used to query Slack APIs on behalf of the user
 """
 
 import logging
@@ -23,22 +24,19 @@ settings = get_settings()
 
 SLACK_OAUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
-SLACK_USER_INFO_URL = "https://slack.com/api/users.identity"
+SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
 
-# Scopes needed to read channel history and user info
+# User token scopes — must match exactly what is listed in your Slack app's
+# OAuth & Permissions → User Token Scopes section.
 USER_SCOPES = [
     "channels:history",
     "channels:read",
     "users:read",
     "users:read.email",
-    "groups:history",   # private channels the user is in (optional)
-    "identity.basic",
-    "identity.email",
 ]
 
 
 def build_auth_url(state: str) -> str:
-    # Prefix with "slack:" so the callback page can tell Slack apart from GitHub
     scopes = ",".join(USER_SCOPES)
     return (
         f"{SLACK_OAUTH_URL}"
@@ -57,7 +55,7 @@ async def exchange_code(code: str) -> dict:
                 "client_id": settings.slack_client_id,
                 "client_secret": settings.slack_client_secret,
                 "code": code,
-                "redirect_uri": f"{settings.app_base_url}/auth/slack/callback",
+                "redirect_uri": settings.app_base_url,
             },
             timeout=15.0,
         )
@@ -68,16 +66,21 @@ async def exchange_code(code: str) -> dict:
         return data
 
 
-async def get_user_identity(user_token: str) -> dict:
+async def get_user_info(user_token: str, user_id: str) -> dict:
+    """Fetch display name and email via users.info (requires users:read)."""
     async with httpx.AsyncClient(
         headers={"Authorization": f"Bearer {user_token}"}
     ) as client:
-        resp = await client.get(SLACK_USER_INFO_URL, timeout=10.0)
+        resp = await client.get(
+            SLACK_USERS_INFO_URL,
+            params={"user": user_id},
+            timeout=10.0,
+        )
         resp.raise_for_status()
         data = resp.json()
         if not data.get("ok"):
-            raise ValueError(f"Slack identity error: {data.get('error')}")
-        return data
+            raise ValueError(f"Slack users.info error: {data.get('error')}")
+        return data.get("user", {})
 
 
 async def save_slack_token(
@@ -93,15 +96,20 @@ async def save_slack_token(
     if not user_token or not slack_user_id:
         raise ValueError("Missing user token or user ID in OAuth response")
 
-    # Fetch identity for display name / email
-    identity = {}
+    # Fetch profile via users.info
+    display_name = None
+    email = None
     try:
-        identity = await get_user_identity(user_token)
+        user_info = await get_user_info(user_token, slack_user_id)
+        profile = user_info.get("profile", {})
+        display_name = (
+            profile.get("display_name")
+            or profile.get("real_name")
+            or user_info.get("name")
+        )
+        email = profile.get("email")
     except Exception as e:
-        logger.warning("Could not fetch Slack identity: %s", e)
-
-    display_name = identity.get("user", {}).get("name")
-    email = identity.get("user", {}).get("email")
+        logger.warning("Could not fetch Slack user info: %s", e)
 
     # Upsert SlackUserToken
     result = await db.execute(
@@ -114,10 +122,10 @@ async def save_slack_token(
 
     if token_record:
         token_record.access_token = user_token
-        token_record.token_scopes = ",".join(authed_user.get("scope", "").split(","))
+        token_record.token_scopes = authed_user.get("scope", "")
         token_record.slack_team_name = team_name
-        token_record.slack_display_name = display_name
-        token_record.slack_email = email
+        token_record.slack_display_name = display_name or token_record.slack_display_name
+        token_record.slack_email = email or token_record.slack_email
     else:
         token_record = SlackUserToken(
             slack_user_id=slack_user_id,

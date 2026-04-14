@@ -142,8 +142,6 @@ channels:history
 channels:read
 users:read
 users:read.email
-identity.basic
-identity.email
 ```
 
 > These are **User Token Scopes**, not Bot Token Scopes.
@@ -183,16 +181,55 @@ Copy the **Client ID** and **Client Secret** into `.env`.
 
 ## Deploying to Streamlit Cloud
 
-Deploy to **[Streamlit Community Cloud](https://streamlit.io/cloud)** (free) to get a permanent public HTTPS URL. Use that URL in your Slack and GitHub OAuth app settings.
+Deploy to **[Streamlit Community Cloud](https://streamlit.io/cloud)** (free) to get a permanent public HTTPS URL. Use that URL in your Slack and GitHub OAuth app settings — no tunneling required.
 
-1. Push the repo to GitHub
-2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app** → select your repo
+### 1. Push to GitHub
+
+Make sure your latest code is pushed to a GitHub repository.
+
+### 2. Create the app on Streamlit Cloud
+
+1. Go to [share.streamlit.io](https://share.streamlit.io) → **New app**
+2. Select your repository and branch
 3. Set **Main file path** to `streamlit_app.py`
-4. Under **Settings → Secrets**, paste the contents of `.streamlit/secrets.toml.example` with your values filled in
-5. Copy your app URL (e.g. `https://yourapp.streamlit.app`) into:
-   - `APP_BASE_URL` in Streamlit secrets
-   - Slack app redirect URL
-   - GitHub OAuth callback URL
+4. Click **Deploy**
+
+### 3. Add secrets
+
+Once deployed, go to **⋮ → Settings → Secrets** and paste the following, filling in your values:
+
+```toml
+DATABASE_URL      = "postgresql+asyncpg://user:password@host:5432/el_ops"
+REDIS_URL         = "redis://..."
+
+SLACK_CLIENT_ID     = "your-slack-client-id"
+SLACK_CLIENT_SECRET = "your-slack-client-secret"
+
+GITHUB_CLIENT_ID     = "your-github-client-id"
+GITHUB_CLIENT_SECRET = "your-github-client-secret"
+
+ANTHROPIC_API_KEY = "sk-ant-..."
+ANTHROPIC_MODEL   = "claude-sonnet-4-6"
+
+APP_BASE_URL = "https://yourapp.streamlit.app"
+
+ENABLE_AI_EXTRACTION = "true"
+```
+
+> Keys must be **uppercase** to match the environment variable names the app expects.
+
+### 4. Update OAuth callback URLs
+
+Copy your Streamlit app URL (e.g. `https://yourapp.streamlit.app`) and set it as the redirect/callback URL in both:
+
+- **Slack app** → OAuth & Permissions → Redirect URLs
+- **GitHub OAuth app** → Authorization callback URL
+
+Both OAuth flows redirect back to the root Streamlit URL — no `/callback` path needed.
+
+### 5. Reboot the app
+
+After saving secrets, click **Reboot app** to apply them.
 
 ---
 
