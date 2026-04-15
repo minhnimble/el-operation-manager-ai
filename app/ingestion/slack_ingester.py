@@ -439,12 +439,14 @@ class SlackIngester:
         channel_name: str,
         slack_user_id: str,
         oldest: datetime | None = None,
+        latest: datetime | None = None,
         filter_user_id: str | None = None,
     ) -> tuple[int, list[str]]:
         """Backfill a channel into SlackMessage table.
 
         Returns (count_saved, unresolved_bot_usernames).
 
+        oldest / latest — inclusive time bounds passed to the Slack API.
         filter_user_id — when set, only messages sent by OR mentioning this
         user are stored. Pass None to store all messages (EM syncing for self).
 
@@ -457,6 +459,7 @@ class SlackIngester:
         """
         is_standup = _is_standup_channel(channel_name)
         oldest_ts = oldest.timestamp() if oldest else None
+        latest_ts = latest.timestamp() if latest else None
         saved = 0
         unresolved_bot_names: list[str] = []
 
@@ -471,7 +474,7 @@ class SlackIngester:
                 filter_user_id, channel_name, target_names,
             )
 
-        async for msg in self.iter_channel_messages(channel_id, oldest=oldest_ts):
+        async for msg in self.iter_channel_messages(channel_id, oldest=oldest_ts, latest=latest_ts):
             subtype = msg.get("subtype", "")
             ts = msg.get("ts", "")
 

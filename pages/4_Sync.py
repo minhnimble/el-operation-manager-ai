@@ -13,6 +13,7 @@ connected their own GitHub account via OAuth for the sync to work.
 """
 
 import asyncio
+from datetime import date, time as dt_time
 import streamlit as st
 
 from app.streamlit_env import load_streamlit_secrets_into_env
@@ -139,11 +140,13 @@ async def _sync_slack_channel(
     channel_id: str,
     channel_name: str,
     oldest: datetime,
+    latest: datetime | None = None,
     filter_user_id: str | None = None,
 ) -> tuple[int, str | None, list[str]]:
     """Sync one channel. Returns (messages_saved, error_or_None, unresolved_bot_names).
 
-    filter_user_id — when set, only messages from or mentioning this user are saved.
+    oldest / latest   — time bounds; latest=None means up to the present.
+    filter_user_id    — when set, only messages from or mentioning this user are saved.
     unresolved_bot_names — standup bot usernames that couldn't be matched to any user.
     """
     async with AsyncSessionLocal() as db:
@@ -155,6 +158,7 @@ async def _sync_slack_channel(
                 channel_name=channel_name,
                 slack_user_id=slack_user_id,
                 oldest=oldest,
+                latest=latest,
                 filter_user_id=filter_user_id,
             )
             # backfill_channel returns (count, unresolved_names); guard against
@@ -410,6 +414,54 @@ is_batch = len(selected_names) > 1
 
 st.markdown("---")
 
+# ─── Date range selector (shared for Slack + GitHub) ─────────────────────────
+
+st.subheader("Date range")
+
+_date_mode = st.radio(
+    "date_mode",
+    ["Last N days", "Custom range"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="date_mode",
+)
+
+if _date_mode == "Last N days":
+    _d_col1, _d_col2 = st.columns([3, 1])
+    with _d_col1:
+        _days = st.slider("Days to backfill", min_value=1, max_value=365, value=7, key="days_slider")
+    with _d_col2:
+        _days = st.number_input(
+            "Or enter days", min_value=1, max_value=3650, value=_days,
+            key="days_input", label_visibility="visible",
+        )
+    sync_start: datetime = datetime.utcnow() - timedelta(days=_days)
+    sync_end: datetime | None = None
+    st.caption(f"From **{sync_start.strftime('%b %d, %Y')}** to **now**.")
+else:
+    _today = date.today()
+    _range = st.date_input(
+        "Select date range",
+        value=(_today - timedelta(days=7), _today),
+        max_value=_today,
+        key="date_range_input",
+    )
+    # date_input returns a tuple when a range is selected, a single date otherwise
+    if isinstance(_range, (list, tuple)) and len(_range) == 2:
+        _start_d, _end_d = _range[0], _range[1]
+    elif isinstance(_range, (list, tuple)) and len(_range) == 1:
+        _start_d = _end_d = _range[0]
+    else:
+        _start_d = _end_d = _range  # type: ignore[assignment]
+
+    sync_start = datetime.combine(_start_d, dt_time.min)
+    sync_end   = datetime.combine(_end_d,   dt_time(23, 59, 59))
+    st.caption(
+        f"From **{_start_d.strftime('%b %d, %Y')}** to **{_end_d.strftime('%b %d, %Y')}**."
+    )
+
+st.markdown("---")
+
 # ─── Slack Sync ───────────────────────────────────────────────────────────────
 
 st.subheader("Slack")
@@ -430,15 +482,6 @@ else:
         f"**{selected_names[0]}**. No separate token needed."
     )
 
-_slack_col1, _slack_col2 = st.columns([3, 1])
-with _slack_col1:
-    days_slack = st.slider("Days to backfill", min_value=1, max_value=365, value=7, key="slack_days")
-with _slack_col2:
-    days_slack = st.number_input(
-        "Or enter days", min_value=1, max_value=3650, value=days_slack,
-        key="slack_days_input", label_visibility="visible",
-    )
-
 _slack_btn_col1, _slack_btn_col2 = st.columns(2)
 with _slack_btn_col1:
     sync_normal_clicked = st.button(
@@ -453,7 +496,7 @@ with _slack_btn_col2:
 
 if sync_normal_clicked or sync_standup_clicked:
     slack_sync_mode = "normal" if sync_normal_clicked else "standup"
-    oldest = datetime.utcnow() - timedelta(days=days_slack)
+    oldest = sync_start
     grand_total_msgs = 0
     all_slack_errors: list[str] = []
 
@@ -548,6 +591,7 @@ if sync_normal_clicked or sync_standup_clicked:
                         _sync_slack_channel(
                             access_token, slack_team_id, slack_user_id,
                             ch_id, ch_name, oldest,
+                            latest=sync_end,
                             filter_user_id=member_filter,
                         )
                     )
@@ -700,17 +744,8 @@ if members_with_gh:
     gh_list = ", ".join(f"**{n}** (@{gh_info[n][1]})" for n, _ in members_with_gh)
     st.caption(f"Will sync: {gh_list}")
 
-    _gh_col1, _gh_col2 = st.columns([3, 1])
-    with _gh_col1:
-        days_github = st.slider("Days to backfill", min_value=1, max_value=365, value=7, key="github_days")
-    with _gh_col2:
-        days_github = st.number_input(
-            "Or enter days", min_value=1, max_value=3650, value=days_github,
-            key="github_days_input", label_visibility="visible",
-        )
-
     if st.button("Sync GitHub", type="primary"):
-        since = datetime.utcnow() - timedelta(days=days_github)
+        since = sync_start
         grand_gh_counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
 
         overall_gh_progress = st.progress(
