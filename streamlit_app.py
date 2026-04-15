@@ -10,7 +10,6 @@ import traceback
 
 import nest_asyncio
 import streamlit as st
-import streamlit.components.v1 as _components
 
 from app.streamlit_env import load_streamlit_secrets_into_env
 
@@ -85,23 +84,7 @@ if "code" in params:
                     f"✅ Signed in as **{token.slack_display_name}** "
                     f"(team: {token.slack_team_name})"
                 )
-                # Reload the original tab (window.opener set by window.open()
-                # in the Connect page button) then close this new tab.
-                # window.top.opener works from inside the component iframe
-                # because it's same-origin with the Streamlit top frame.
-                _components.html("""
-                <script>
-                try {
-                    var opener = window.top.opener;
-                    if (opener && !opener.closed) {
-                        opener.location.reload();
-                    }
-                } catch(e) {}
-                setTimeout(function() {
-                    try { window.top.close(); } catch(e) {}
-                }, 800);
-                </script>
-                """, height=0)
+                st.switch_page("pages/1_Connect.py")
 
             except Exception as e:
                 status.update(label="Slack connection failed", state="error")
@@ -134,19 +117,7 @@ if "code" in params:
                 st.success(
                     f"✅ GitHub connected as **@{link.github_login}**"
                 )
-                _components.html("""
-                <script>
-                try {
-                    var opener = window.top.opener;
-                    if (opener && !opener.closed) {
-                        opener.location.reload();
-                    }
-                } catch(e) {}
-                setTimeout(function() {
-                    try { window.top.close(); } catch(e) {}
-                }, 800);
-                </script>
-                """, height=0)
+                st.switch_page("pages/1_Connect.py")
 
             except Exception as e:
                 status.update(label="GitHub connection failed", state="error")

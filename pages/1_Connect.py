@@ -31,15 +31,7 @@ def run(coro):
 
 
 def _oauth_button(label: str, url: str, primary: bool = True) -> None:
-    """Open the OAuth URL in a new tab via window.open() so that window.opener
-    is set in that tab.  The callback page (streamlit_app.py) then reloads
-    this tab through window.top.opener and closes itself.
-
-    Using onclick/window.open() (not target="_blank") is intentional: browsers
-    silently add noopener to HTML target=_blank cross-origin links since 2021,
-    which would make window.opener null in the new tab and break the close-back
-    flow.  window.open() from a JS handler always preserves the opener reference.
-    """
+    """Open the OAuth URL in a new tab and close the current tab."""
     import html as _html
 
     safe_href = _html.escape(url, quote=True)
@@ -51,7 +43,7 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
 
     st.markdown(
         f"""<a href="#"
-            onclick="window.open('{safe_href}', '_blank'); return false;"
+            onclick="window.open('{safe_href}', '_blank'); window.close(); return false;"
             style="
                 display:inline-block;
                 background:{bg};
