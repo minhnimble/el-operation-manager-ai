@@ -48,9 +48,11 @@ if "code" in params:
     # Slack callback — state starts with "slack:"
     if state.startswith("slack:"):
         try:
+            # exchange_code is sync; save_slack_token is async (DB only)
+            token_data = exchange_code(code)
+
             async def _slack_cb():
                 async with AsyncSessionLocal() as db:
-                    token_data = await exchange_code(code)
                     return await save_slack_token(db, token_data)
 
             token = run(_slack_cb())

@@ -1,12 +1,8 @@
 """
 Slack user OAuth flow — Sign in with Slack (OAuth v2).
 
-Flow:
-  1. User visits /auth/slack  → redirect to Slack authorization page
-  2. Slack redirects back with ?code=...
-  3. Exchange code for user access token
-  4. Call users.info to get display name / email (requires users:read)
-  5. Store token → used to query Slack APIs on behalf of the user
+HTTP calls use synchronous httpx to avoid DNS resolution issues
+when called from Streamlit's async/sync mixed context.
 """
 
 import logging
@@ -26,8 +22,6 @@ SLACK_OAUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
 
-# User token scopes — must match exactly what is listed in your Slack app's
-# OAuth & Permissions → User Token Scopes section.
 USER_SCOPES = [
     "channels:history",
     "channels:read",
@@ -47,9 +41,10 @@ def build_auth_url(state: str) -> str:
     )
 
 
-async def exchange_code(code: str) -> dict:
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
+def exchange_code(code: str) -> dict:
+    """Exchange OAuth code for user token — synchronous HTTP call."""
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(
             SLACK_TOKEN_URL,
             data={
                 "client_id": settings.slack_client_id,
@@ -57,7 +52,6 @@ async def exchange_code(code: str) -> dict:
                 "code": code,
                 "redirect_uri": settings.app_base_url,
             },
-            timeout=15.0,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -66,16 +60,13 @@ async def exchange_code(code: str) -> dict:
         return data
 
 
-async def get_user_info(user_token: str, user_id: str) -> dict:
-    """Fetch display name and email via users.info (requires users:read)."""
-    async with httpx.AsyncClient(
-        headers={"Authorization": f"Bearer {user_token}"}
+def get_user_info(user_token: str, user_id: str) -> dict:
+    """Fetch user profile via users.info — synchronous HTTP call."""
+    with httpx.Client(
+        headers={"Authorization": f"Bearer {user_token}"},
+        timeout=10.0,
     ) as client:
-        resp = await client.get(
-            SLACK_USERS_INFO_URL,
-            params={"user": user_id},
-            timeout=10.0,
-        )
+        resp = client.get(SLACK_USERS_INFO_URL, params={"user": user_id})
         resp.raise_for_status()
         data = resp.json()
         if not data.get("ok"):
@@ -86,7 +77,7 @@ async def get_user_info(user_token: str, user_id: str) -> dict:
 async def save_slack_token(
     db: AsyncSession, token_data: dict
 ) -> SlackUserToken:
-    """Persist the token and upsert the User record."""
+    """Persist the token and upsert the User record (async — DB only)."""
     authed_user = token_data.get("authed_user", {})
     user_token = authed_user.get("access_token")
     slack_user_id = authed_user.get("id")
@@ -96,11 +87,11 @@ async def save_slack_token(
     if not user_token or not slack_user_id:
         raise ValueError("Missing user token or user ID in OAuth response")
 
-    # Fetch profile via users.info
+    # Sync HTTP call — safe to call from async context
     display_name = None
     email = None
     try:
-        user_info = await get_user_info(user_token, slack_user_id)
+        user_info = get_user_info(user_token, slack_user_id)
         profile = user_info.get("profile", {})
         display_name = (
             profile.get("display_name")

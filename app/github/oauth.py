@@ -1,8 +1,8 @@
 """
 GitHub OAuth flow.
 
-After user clicks /link-github → GitHub redirects to /auth/github/callback
-with ?code=<code>&state=<team_id>:<slack_user_id>
+HTTP calls use synchronous httpx to avoid DNS resolution issues
+when called from Streamlit's async/sync mixed context.
 """
 
 import logging
@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-async def exchange_code_for_token(code: str) -> dict:
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
+def exchange_code_for_token(code: str) -> dict:
+    """Exchange OAuth code for GitHub access token — synchronous HTTP call."""
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(
             "https://github.com/login/oauth/access_token",
             json={
                 "client_id": settings.github_client_id,
@@ -28,20 +29,21 @@ async def exchange_code_for_token(code: str) -> dict:
                 "code": code,
             },
             headers={"Accept": "application/json"},
-            timeout=15.0,
         )
         resp.raise_for_status()
         return resp.json()
 
 
-async def get_github_user(access_token: str) -> dict:
-    async with httpx.AsyncClient(
+def get_github_user(access_token: str) -> dict:
+    """Fetch authenticated GitHub user profile — synchronous HTTP call."""
+    with httpx.Client(
         headers={
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/vnd.github+json",
-        }
+        },
+        timeout=10.0,
     ) as client:
-        resp = await client.get("https://api.github.com/user", timeout=10.0)
+        resp = client.get("https://api.github.com/user")
         resp.raise_for_status()
         return resp.json()
 
@@ -52,13 +54,14 @@ async def link_github_to_user(
     slack_team_id: str,
     code: str,
 ) -> UserGitHubLink:
-    """Exchange OAuth code, fetch GitHub profile, store link."""
-    token_data = await exchange_code_for_token(code)
+    """Exchange OAuth code, fetch GitHub profile, store link (async — DB only)."""
+    # Sync HTTP calls — safe to call from async context
+    token_data = exchange_code_for_token(code)
     access_token = token_data.get("access_token")
     if not access_token:
         raise ValueError(f"GitHub OAuth error: {token_data.get('error_description')}")
 
-    gh_user = await get_github_user(access_token)
+    gh_user = get_github_user(access_token)
 
     # Ensure User row exists
     user_result = await db.execute(
@@ -98,7 +101,5 @@ async def link_github_to_user(
         db.add(link)
 
     await db.flush()
-    logger.info(
-        "Linked GitHub %s to Slack user %s", gh_user["login"], slack_user_id
-    )
+    logger.info("Linked GitHub %s to Slack user %s", gh_user["login"], slack_user_id)
     return link
