@@ -177,6 +177,46 @@ def _enrich_user_map(
     return enriched
 
 
+def _collect_unknown_channel_ids(items: list[dict], known: dict[str, str]) -> set[str]:
+    """Return channel IDs from activity items that have no name in *known* yet."""
+    unknown: set[str] = set()
+    for item in items:
+        cid = item.get("slack_channel_id") or ""
+        if cid and cid not in known and not item.get("channel_name", "").startswith("#") and item.get("channel_name", "") == cid:
+            unknown.add(cid)
+        # Also catch items where channel_name is still the raw ID
+        ch = item.get("channel_name") or ""
+        if ch and ch == cid:
+            unknown.add(cid)
+    return unknown
+
+
+def _enrich_channel_map(
+    channel_map: dict[str, str],
+    unknown_ids: set[str],
+    access_token: str,
+) -> dict[str, str]:
+    """Fetch channel names from Slack conversations.info for unknown channel IDs."""
+    import requests
+
+    enriched = dict(channel_map)
+    for cid in unknown_ids:
+        try:
+            resp = requests.get(
+                "https://slack.com/api/conversations.info",
+                params={"channel": cid},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("ok"):
+                name = data.get("channel", {}).get("name") or cid
+                enriched[cid] = name
+        except Exception:
+            pass
+    return enriched
+
+
 def _format_slack_text(text: str, user_map: dict[str, str]) -> str:
     """Convert Slack mrkdwn codes in message body to readable markdown.
 
@@ -295,8 +335,22 @@ if not report:
 _user_map: dict[str, str] = run(_load_user_map(slack_team_id))
 
 _all_slack_msgs = [a for a in report.recent_activity if a.get("source") == "slack"]
-_unknown_ids = _collect_unknown_user_ids(_all_slack_msgs, _user_map)
-if _unknown_ids:
+
+# Build initial channel map from what the DB already returned
+_channel_map: dict[str, str] = {
+    a["slack_channel_id"]: a["channel_name"]
+    for a in _all_slack_msgs
+    if a.get("slack_channel_id") and a.get("channel_name") and a["channel_name"] != a["slack_channel_id"]
+}
+
+_unknown_user_ids = _collect_unknown_user_ids(_all_slack_msgs, _user_map)
+_unknown_channel_ids = {
+    a["slack_channel_id"]
+    for a in _all_slack_msgs
+    if a.get("slack_channel_id") and a["slack_channel_id"] not in _channel_map
+}
+
+if _unknown_user_ids or _unknown_channel_ids:
     try:
         from app.models.slack_token import SlackUserToken
 
@@ -313,9 +367,18 @@ if _unknown_ids:
 
         _slack_token = run(_get_slack_token_for_report())
         if _slack_token:
-            _user_map = _enrich_user_map(_user_map, _unknown_ids, _slack_token)
+            if _unknown_user_ids:
+                _user_map = _enrich_user_map(_user_map, _unknown_user_ids, _slack_token)
+            if _unknown_channel_ids:
+                _channel_map = _enrich_channel_map(_channel_map, _unknown_channel_ids, _slack_token)
     except Exception:
         pass  # enrichment is best-effort; falls back to raw ID on any error
+
+# Patch channel_name in activity items using the enriched channel map
+for _a in report.recent_activity:
+    _cid = _a.get("slack_channel_id") or ""
+    if _cid and _cid in _channel_map:
+        _a["channel_name"] = _channel_map[_cid]
 
 st.subheader(f"Report: {report.user_display_name}")
 st.caption(f"Period: {report.date_range}")
