@@ -9,11 +9,13 @@ Built for Engineering Managers, Tech Leads, and CTOs who want to reduce manual s
 ## What It Does
 
 - Connects to Slack via **Sign in with Slack** (user OAuth) — no bot app required
-- Pulls standup messages and channel activity from channels you're a member of
+- Pulls messages from **public and private channels** you are a member of
+- Syncs **standup messages** from standup bots (Geekbot-style) by resolving the bot's username to a real team member
+- For team member syncs, captures only messages **sent by** or **mentioning** that member — not the entire channel history
 - Pulls commits, PRs, reviews, and issues from GitHub
 - Normalizes everything into a unified `WorkUnit` model
-- **Team management** — EM adds team members from the workspace; their activity is captured automatically without requiring them to sign in
-- Generates structured work reports for any tracked team member via a Streamlit UI
+- **Team management** — EM adds team members from the workspace; syncs are scoped to channels the member is actually in
+- Generates structured work reports per member with activity feed and a one-click copyable summary
 - Uses Claude AI to classify work items and produce leadership insights
 
 ---
@@ -23,20 +25,21 @@ Built for Engineering Managers, Tech Leads, and CTOs who want to reduce manual s
 | Layer | Technology |
 |---|---|
 | UI | Streamlit |
-| Database | PostgreSQL (SQLAlchemy async) |
-| Cache / Queue | Redis + Celery |
-| Slack integration | Slack SDK — Sign in with Slack (user OAuth) |
-| GitHub integration | GitHub REST API v3 (user OAuth) |
+| Database | PostgreSQL (SQLAlchemy async + NullPool) |
+| Slack integration | Sign in with Slack — user OAuth (no bot, no webhooks) |
+| GitHub integration | GitHub REST API v3 — user OAuth |
 | AI | Anthropic Claude API |
 | Migrations | Alembic |
+
+> **No Redis or Celery required.** Syncs run directly in the Streamlit session and work on Streamlit Cloud out of the box.
 
 ---
 
 ## Prerequisites
 
 - Python 3.13+
-- Docker + Docker Compose
-- A Slack OAuth app (see setup below — no bot or event subscriptions needed)
+- A PostgreSQL database (local Docker or Supabase for cloud)
+- A Slack OAuth app (see setup below)
 - A GitHub OAuth app
 - An Anthropic API key
 
@@ -64,7 +67,6 @@ Open `.env` and fill in:
 
 ```env
 # Slack OAuth app (Sign in with Slack — no bot, no event subscriptions needed)
-# Create at api.slack.com/apps → OAuth & Permissions → User Token Scopes
 SLACK_CLIENT_ID=...
 SLACK_CLIENT_SECRET=...
 
@@ -75,18 +77,17 @@ GITHUB_CLIENT_SECRET=...
 # Anthropic — console.anthropic.com
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Your Streamlit Cloud app URL (e.g. https://yourapp.streamlit.app)
-# For local dev, use http://localhost:8501
+# Your Streamlit Cloud app URL (or http://localhost:8501 for local dev)
 APP_BASE_URL=https://yourapp.streamlit.app
 ```
 
-### 3. Start infrastructure
+### 3. Start the database
 
 ```bash
 make up
 ```
 
-Starts PostgreSQL on port `5432` and Redis on port `6379` via Docker Compose.
+Starts PostgreSQL on port `5432` via Docker Compose.
 
 ### 4. Run database migrations
 
@@ -94,41 +95,22 @@ Starts PostgreSQL on port `5432` and Redis on port `6379` via Docker Compose.
 make migrate
 ```
 
-### 5. (Optional) Seed development data
-
-Populates the database with 3 fake users and 30 days of Slack + GitHub activity for local testing.
-
-```bash
-make seed
-```
-
 ---
 
 ## Running the App
 
-Open 3 terminals:
-
-**Terminal 1 — Streamlit UI**
 ```bash
 make dev
 # opens at http://localhost:8501
 ```
 
-**Terminal 2 — Celery worker** (processes background sync jobs)
-```bash
-make worker
-```
-
-**Terminal 3 — Celery beat** (nightly scheduled syncs)
-```bash
-make beat
-```
+No worker process needed — all syncs run inline in the Streamlit session.
 
 ---
 
 ## Slack App Setup
 
-This app uses **Sign in with Slack** — no bot, no event subscriptions, no webhooks. Users authorize once and their token is used to pull channel history on demand.
+This app uses **Sign in with Slack** — no bot, no event subscriptions, no webhooks. The EM authorizes once and their user token is used to pull channel history on demand.
 
 ### 1. Create a Slack App
 
@@ -139,13 +121,15 @@ Go to **[api.slack.com/apps](https://api.slack.com/apps)** → **Create New App*
 Go to **OAuth & Permissions** → scroll to **User Token Scopes** and add:
 
 ```
-channels:history
-channels:read
-users:read
-users:read.email
+channels:history       — read messages in public channels
+channels:read          — list public channels
+groups:history         — read messages in private channels
+groups:read            — list private channels
+users:read             — resolve user profiles (for standup name matching)
+users:read.email       — resolve user emails
 ```
 
-> These are **User Token Scopes**, not Bot Token Scopes.
+> These must be **User Token Scopes**, not Bot Token Scopes.
 
 ### 3. Add Redirect URL
 
@@ -155,7 +139,7 @@ Under **OAuth & Permissions → Redirect URLs**, add your app's root URL:
 https://yourapp.streamlit.app
 ```
 
-> OAuth callbacks are handled by the Streamlit app at the root URL via query parameters — no `/callback` path needed.
+> OAuth callbacks are handled at the root URL via query parameters — no `/callback` path needed.
 
 ### 4. Copy credentials to `.env`
 
@@ -174,15 +158,11 @@ Go to **[github.com/settings/developers](https://github.com/settings/developers)
 | Homepage URL | `https://yourapp.streamlit.app` |
 | Authorization callback URL | `https://yourapp.streamlit.app` |
 
-> Same as Slack — callbacks land on the root URL and are detected via the `state` query parameter.
-
 Copy the **Client ID** and **Client Secret** into `.env`.
 
 ---
 
 ## Deploying to Streamlit Cloud
-
-Deploy to **[Streamlit Community Cloud](https://streamlit.io/cloud)** (free) to get a permanent public HTTPS URL. Use that URL in your Slack and GitHub OAuth app settings — no tunneling required.
 
 ### 1. Push to GitHub
 
@@ -197,32 +177,23 @@ Make sure your latest code is pushed to a GitHub repository.
 
 ### 3. Set up the database (Supabase)
 
-Streamlit Cloud **blocks direct TCP connections to port 5432**, so a standard PostgreSQL URL will not work. You must use Supabase's **Transaction Pooler** instead.
-
-#### Get the Transaction Pooler URL
+Streamlit Cloud blocks direct TCP to port 5432 — use Supabase's **Transaction Pooler**.
 
 1. Go to your Supabase project → **Settings** → **Database**
-2. Scroll to **Connection Pooling** → set Mode to **Transaction**
-3. Copy the connection string — it looks like:
-```
-postgresql://postgres.xxxx:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
-```
-4. Change `postgresql://` → `postgresql+asyncpg://` and append `?ssl=require`:
+2. Scroll to **Connection Pooling** → Mode: **Transaction**
+3. Copy the connection string and convert:
 ```
 postgresql+asyncpg://postgres.xxxx:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres?ssl=require
 ```
 
-Use this URL as `DATABASE_URL` in Streamlit secrets.
-
-#### Run migrations separately
-
-The transaction pooler cannot run DDL migrations. Run them once from your **local machine** using the direct connection URL (port 5432):
+#### Run migrations from your local machine
 
 ```bash
-DATABASE_URL="postgresql+asyncpg://postgres:[password]@db.xxxx.supabase.co:5432/postgres" alembic upgrade head
+DATABASE_URL="postgresql+asyncpg://postgres:[password]@db.xxxx.supabase.co:5432/postgres" \
+  .venv/bin/alembic upgrade head
 ```
 
-> The direct URL (port 5432) is only used for migrations from your local machine. The app always uses the pooler URL at runtime.
+> Use the **direct connection** (port 5432) for migrations only. The app always uses the pooler URL at runtime.
 
 | Connection type | Port | Streamlit Cloud |
 |---|---|---|
@@ -232,10 +203,9 @@ DATABASE_URL="postgresql+asyncpg://postgres:[password]@db.xxxx.supabase.co:5432/
 
 ### 4. Add secrets
 
-Once deployed, go to **⋮ → Settings → Secrets** and paste the following, filling in your values:
+Go to **⋮ → Settings → Secrets**:
 
 ```toml
-# Use the Transaction Pooler URL — NOT the direct connection URL
 DATABASE_URL = "postgresql+asyncpg://postgres.xxxx:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres?ssl=require"
 
 SLACK_CLIENT_ID     = "your-slack-client-id"
@@ -252,64 +222,83 @@ APP_BASE_URL = "https://yourapp.streamlit.app"
 ENABLE_AI_EXTRACTION = "true"
 ```
 
-> Keys must be **uppercase** to match the environment variable names the app expects.
-
 ### 5. Update OAuth callback URLs
 
-Copy your Streamlit app URL (e.g. `https://yourapp.streamlit.app`) and set it as the redirect/callback URL in both:
-
+Set your Streamlit app URL as the redirect/callback URL in both:
 - **Slack app** → OAuth & Permissions → Redirect URLs
 - **GitHub OAuth app** → Authorization callback URL
 
-Both OAuth flows redirect back to the root Streamlit URL — no `/callback` path needed.
-
 ### 6. Reboot the app
 
-After saving secrets, click **Reboot app** to apply them.
+After saving secrets, click **Reboot app**.
 
 ---
 
 ## Usage
 
-Open the app at `http://localhost:8501` (or your Streamlit Cloud URL).
-
 ### 1. Connect Accounts
 
-Go to **🔗 Connect Accounts** and click **Sign in with Slack**. After authorizing, click **Connect GitHub**. Both flows redirect back to the app automatically.
+Go to **🔗 Connect Accounts** → **Sign in with Slack**. After authorizing, click **Connect GitHub**.
+
+Use **Reconnect Slack** at any time to refresh your token or pick up new OAuth scopes (e.g. after adding `groups:read` / `groups:history` for private channels).
 
 ### 2. Build Your Team
 
-Go to **👥 Team Overview** and click **Load workspace users**. Select your direct reports from the list and click **Add selected members**.
+Go to **👥 Team Overview** → **Load workspace users** → select your direct reports → **Add selected members**.
 
-> **Team members do not need to sign in.** Their Slack messages are captured automatically when you sync, because the ingester stores all message authors in every channel you're a member of. GitHub metrics will show zeros until each team member connects their own GitHub account.
+Optionally supply each member's GitHub handle. If they later connect their own GitHub via OAuth, that takes precedence.
+
+> Team members do not need to sign in to the app.
 
 ### 3. Sync Data
 
-Go to **🔄 Sync Data**, set how many days to backfill, and click **Sync Slack** and **Sync GitHub**. Jobs run in the background via Celery — check back in a minute or two.
+Go to **🔄 Sync Data**, select a team member (or yourself), set the backfill window, and click **Sync Slack** or **Sync GitHub**.
+
+**How Slack sync works:**
+
+| Scenario | Behaviour |
+|---|---|
+| Syncing **yourself** | All messages from all joined channels (public + private) are captured |
+| Syncing a **team member** | Only channels that member is in are processed; within each channel only messages **sent by** or **@mentioning** that member are saved |
+| **Standup bot messages** (Geekbot-style) | The bot's `username` field is matched against the member's display/real name — only that member's own standup entry is saved, not the entire bot thread |
+
+**Channel ignore list** — the following are always skipped regardless of membership:
+
+- Channels with `nimble-` prefix
+- Channels with `-activity` or `-corner` suffix
+- Channels with `ic-` prefix
+- Exact: `access-requests`, `vn-community`, `cat-place`, `hardware-and-machinery`
+
+Progress is shown per channel and per GitHub repo with a live log and progress bar.
 
 ### 4. Generate a Work Report
 
-Go to **📊 Work Report**, select any team member from the dropdown (includes you and everyone added to your team), choose a date range, and click **Generate Report**. Toggle **AI insights** on to get Claude-powered work classification and leadership summary.
+Go to **📊 Work Report**, select a team member, choose a date range, and click **Generate Report**.
+
+- **Activity Feed** — GitHub commits/PRs/reviews and Slack standups/messages, all browsable
+- **AI Insights** — Claude-powered work classification and leadership summary (toggle on/off)
+- **Share Summary** — formatted text block with a one-click copy button for pasting into Slack, email, or a doc
 
 ### 5. Manage Your Team
 
-Go to **👥 Team Overview** to see all tracked members, their GitHub connection status, and remove anyone who has left the team.
+Go to **👥 Team Overview** to see all tracked members, GitHub connection source (OAuth vs manually set), edit GitHub handles, or remove members.
 
 ---
 
-## Running Tests
+## Standup Bot Integration
 
-Requires a running PostgreSQL instance. Create the test database first:
+The ingester handles two common standup patterns automatically:
 
-```bash
-psql -U postgres -c "CREATE DATABASE el_ops_test;"
-```
+**Pattern 1 — Thread replies** (user responds directly in-thread):
+- Bot posts the question at the top level
+- Team member replies with their own Slack account
+- Replies are captured via `conversations.replies`
 
-Then run:
-
-```bash
-make test
-```
+**Pattern 2 — Bot-reposted summaries** (Geekbot-style):
+- Bot collects answers privately, then reposts each member's standup as a `bot_message` with `username` set to the member's full name
+- The ingester matches `username` against `TeamMember.member_display_name` and `member_real_name` (case-insensitive)
+- The message is stored attributed to the matched member's Slack user ID
+- **Requirement:** the member must be added to your team roster in **Team Overview** with their exact display name matching what the bot uses
 
 ---
 
@@ -318,12 +307,11 @@ make test
 ```
 streamlit_app.py               # Main UI + OAuth callback handler
 pages/
-├── 1_Connect.py               # Sign in with Slack + GitHub linking
-├── 2_Work_Report.py           # Work report UI with charts
-├── 3_Team_Overview.py         # Team management — add/remove members
-└── 4_Sync.py                  # Manual Slack + GitHub sync triggers
+├── 1_Connect.py               # Sign in with Slack + GitHub linking (with disconnect)
+├── 2_Work_Report.py           # Work report UI — charts, activity feed, share summary
+├── 3_Team_Overview.py         # Team management — add/remove/edit members
+└── 4_Sync.py                  # Slack + GitHub sync with per-channel/repo progress
 app/
-├── main.py                    # Optional FastAPI app (REST API)
 ├── config.py                  # Settings (pydantic-settings + .env)
 ├── database.py                # SQLAlchemy async engine + session (NullPool)
 ├── models/
@@ -332,50 +320,40 @@ app/
 │   ├── team_member.py         # TeamMember — EM's tracked team roster
 │   ├── work_unit.py           # WorkUnit — core normalized abstraction
 │   └── raw_data.py            # SlackMessage, GitHubActivity (raw store)
-├── ingestion/                 # Layer 1 — raw data collection
-│   ├── slack_ingester.py      # Pulls channel history via user token
-│   └── github_ingester.py     # Pulls commits, PRs, reviews via user token
-├── normalization/             # Layer 2 — raw → WorkUnit
-│   └── normalizer.py
-├── analytics/                 # Layer 3 — aggregation + reporting
-│   └── report_builder.py
-├── ai/                        # AI pipeline (Claude)
+├── ingestion/
+│   ├── slack_ingester.py      # Channel history, thread replies, standup name resolution
+│   └── github_ingester.py     # Commits, PRs, reviews, issues per user
+├── normalization/
+│   └── normalizer.py          # Raw → WorkUnit (with dedup guards)
+├── analytics/
+│   └── report_builder.py      # Aggregation + WorkReport construction
+├── ai/
 │   ├── schemas.py             # Pydantic output schemas
 │   ├── work_extractor.py      # Standup text → structured work items
 │   └── insight_generator.py   # WorkReport → leadership insights
 ├── slack/
-│   ├── oauth.py               # Sign in with Slack OAuth flow
+│   ├── oauth.py               # Sign in with Slack OAuth flow + token upsert
 │   └── users.py               # Workspace user listing (users.list API)
-├── github/
-│   └── oauth.py               # GitHub OAuth exchange + user linking
-├── api/
-│   └── routes.py              # FastAPI route definitions (optional)
-└── tasks/                     # Celery background tasks
-    ├── celery_app.py          # Celery app + beat schedule
-    ├── ingestion_tasks.py     # Slack backfill + GitHub sync tasks
-    └── normalization_tasks.py # Raw → WorkUnit normalization tasks
+└── github/
+    └── oauth.py               # GitHub OAuth exchange + user linking
 ```
 
 ---
 
 ## Feature Flags
 
-Control which features are active via `.env`:
-
 ```env
 ENABLE_AI_EXTRACTION=true      # AI work classification from standups
-ENABLE_BURNOUT_DETECTION=false # Phase 4 — not yet implemented
-ENABLE_ORG_ANALYTICS=false     # Phase 5 — not yet implemented
+ENABLE_BURNOUT_DETECTION=false # Not yet implemented
+ENABLE_ORG_ANALYTICS=false     # Not yet implemented
 ```
 
 ---
 
 ## Privacy
 
-This tool is designed for team transparency, not surveillance:
-
-- Only public channels the EM has joined are tracked — private channels and DMs are never captured
-- The EM adds team members explicitly; no data is collected for anyone not on the roster
+- Only channels the EM has joined are synced — no access to channels they're not in
+- For team member syncs, only that member's messages (sent or mentioned) are stored — not the full channel history
 - GitHub access requires explicit OAuth consent from each individual user
 - All data is scoped to your workspace and stored in your own database
-- Team members can ask to be removed from the roster at any time
+- Team members can be removed from the roster at any time
