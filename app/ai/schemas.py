@@ -45,6 +45,8 @@ class WorkReport(BaseModel):
     ai_insights: str = ""
     # Raw standups for display
     recent_standups: list[str] = Field(default_factory=list)
+    # Serialized WorkUnit dicts for the activity feed
+    recent_activity: list[dict] = Field(default_factory=list)
 
 
 class InsightResult(BaseModel):

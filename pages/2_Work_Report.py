@@ -196,9 +196,151 @@ if report.ai_insights:
 if report.standup_summary:
     st.caption(f"Standup vs GitHub: {report.standup_summary}")
 
-# Recent standups
-if report.recent_standups:
-    st.markdown("---")
-    with st.expander(f"Recent Standups ({len(report.recent_standups)})"):
-        for i, text in enumerate(report.recent_standups, 1):
-            st.markdown(f"**{i}.** {text}")
+# ─── Activity Feed ────────────────────────────────────────────────────────────
+
+st.markdown("---")
+st.subheader("📋 Activity Feed")
+st.caption("Raw activity captured in this period.")
+
+github_items = [a for a in report.recent_activity if a["source"] == "github"]
+slack_items  = [a for a in report.recent_activity if a["source"] == "slack"]
+
+# ── GitHub activity ──────────────────────────────────────────────────────────
+
+_GITHUB_ICONS = {
+    "commit":       "🔨",
+    "pr_opened":    "🔀",
+    "pr_merged":    "✅",
+    "pr_review":    "👀",
+    "issue_opened": "🐛",
+    "issue_closed": "✔️",
+    "issue_comment":"💬",
+}
+
+with st.expander(f"GitHub Activity ({len(github_items)} items)", expanded=len(github_items) > 0):
+    if not github_items:
+        st.info("No GitHub activity in this period.")
+    else:
+        for item in github_items:
+            icon  = _GITHUB_ICONS.get(item["type"], "⚙️")
+            label = item["type"].replace("_", " ").title()
+            repo  = f"`{item['github_repo']}`" if item["github_repo"] else ""
+            title = item["title"] or (item["body"][:120] if item["body"] else "(no title)")
+            ts    = item["timestamp"]
+
+            col_icon, col_body, col_ts = st.columns([0.3, 5, 1.5])
+            col_icon.markdown(icon)
+            if item["url"]:
+                col_body.markdown(f"**[{title}]({item['url']})** &nbsp; {repo}")
+            else:
+                col_body.markdown(f"**{title}** &nbsp; {repo}")
+            col_ts.caption(ts)
+
+# ── Slack messages ───────────────────────────────────────────────────────────
+
+_SLACK_ICONS = {
+    "standup":      "🗣️",
+    "discussion":   "💬",
+    "thread_reply": "↩️",
+    "announcement": "📢",
+}
+
+standups     = [a for a in slack_items if a["type"] == "standup"]
+other_slack  = [a for a in slack_items if a["type"] != "standup"]
+
+with st.expander(f"Standups ({len(standups)})", expanded=len(standups) > 0):
+    if not standups:
+        st.info("No standup messages in this period.")
+    else:
+        for item in standups:
+            ts   = item["timestamp"]
+            body = item["body"] or item["title"] or "(empty)"
+            ch   = f"#{item['slack_channel_id']}" if item["slack_channel_id"] else ""
+            st.markdown(f"**{ts}** {ch}")
+            st.markdown(body)
+            st.divider()
+
+with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
+    if not other_slack:
+        st.info("No discussion messages in this period.")
+    else:
+        for item in other_slack:
+            icon  = _SLACK_ICONS.get(item["type"], "💬")
+            label = item["type"].replace("_", " ").title()
+            ts    = item["timestamp"]
+            body  = item["body"] or item["title"] or "(empty)"
+            ch    = f"#{item['slack_channel_id']}" if item["slack_channel_id"] else ""
+
+            col_icon, col_body, col_ts = st.columns([0.3, 5, 1.5])
+            col_icon.markdown(icon)
+            col_body.markdown(f"{body[:200]}{'…' if len(body) > 200 else ''} &nbsp; {ch}")
+            col_ts.caption(ts)
+
+# ─── Share Summary ────────────────────────────────────────────────────────────
+
+st.markdown("---")
+st.subheader("📤 Share Summary")
+st.caption("Copy this text to share via Slack, email, or a doc. Click the copy icon in the top-right of the block.")
+
+
+def _build_share_text(r: "WorkReport") -> str:
+    from datetime import datetime as _dt
+    generated = _dt.utcnow().strftime("%b %d, %Y")
+
+    def _pad(label: str, value: int, width: int = 22) -> str:
+        dots = "." * max(1, width - len(label))
+        return f"  {label} {dots} {value}"
+
+    lines = [
+        f"Work Report: {r.user_display_name}",
+        f"Period:      {r.date_range}",
+        f"Generated:   {generated}",
+        "",
+        "── GITHUB ACTIVITY ──────────────────",
+        _pad("Commits",      r.commits),
+        _pad("PRs Opened",   r.prs_opened),
+        _pad("PRs Merged",   r.prs_merged),
+        _pad("PR Reviews",   r.pr_reviews),
+        _pad("Issues Opened",r.issues_opened),
+        "",
+        "── SLACK ACTIVITY ───────────────────",
+        _pad("Standups",       r.standup_count),
+        _pad("Discussions",    r.discussion_messages),
+        _pad("Thread Replies", r.thread_replies),
+    ]
+
+    if r.feature_work or r.bug_fixes or r.architecture_work or r.mentorship or r.incidents:
+        lines += [
+            "",
+            "── AI WORK CLASSIFICATION ───────────",
+            _pad("Feature Work",  r.feature_work),
+            _pad("Bug Fixes",     r.bug_fixes),
+            _pad("Architecture",  r.architecture_work),
+            _pad("Mentorship",    r.mentorship),
+            _pad("Incidents",     r.incidents),
+        ]
+
+    if r.ai_insights:
+        lines += [
+            "",
+            "── AI INSIGHTS ──────────────────────",
+            *[f"  {line}" for line in r.ai_insights.splitlines()],
+        ]
+
+    if r.standup_summary:
+        lines += [
+            "",
+            "── STANDUP VS GITHUB ────────────────",
+            f"  {r.standup_summary}",
+        ]
+
+    if r.recent_standups:
+        lines += ["", "── RECENT STANDUPS ──────────────────"]
+        for i, text in enumerate(r.recent_standups, 1):
+            lines.append(f"  {i}. {text[:300]}{'…' if len(text) > 300 else ''}")
+
+    lines += ["", "─" * 38]
+    return "\n".join(lines)
+
+
+st.code(_build_share_text(report), language="text")

@@ -96,6 +96,27 @@ async def build_work_report(
     standups = standup_result.scalars().all()
     standup_texts = [wu.body for wu in standups if wu.body and wu.body.strip()]
 
+    # Fetch recent activity for the feed (most recent 100, all types)
+    activity_result = await db.execute(
+        select(WorkUnit).where(
+            *base_filter,
+        ).order_by(WorkUnit.timestamp.desc()).limit(100)
+    )
+    activity_units = activity_result.scalars().all()
+    recent_activity = [
+        {
+            "source": wu.source.value,
+            "type": wu.type.value,
+            "title": wu.title or "",
+            "body": wu.body or "",
+            "url": wu.url or "",
+            "github_repo": wu.github_repo or "",
+            "slack_channel_id": wu.slack_channel_id or "",
+            "timestamp": wu.timestamp.strftime("%b %d, %Y %H:%M"),
+        }
+        for wu in activity_units
+    ]
+
     report = WorkReport(
         user_display_name=display_name,
         date_range=date_range,
@@ -108,6 +129,7 @@ async def build_work_report(
         discussion_messages=discussion_messages,
         thread_replies=thread_replies,
         recent_standups=standup_texts[:5],
+        recent_activity=recent_activity,
     )
 
     if include_ai and standup_texts:
