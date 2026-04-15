@@ -411,8 +411,10 @@ class SlackIngester:
                             user_id=resolved_uid,
                         ):
                             saved += 1
-                    elif resolved_uid is None:
-                        # Name didn't resolve — track it so the caller can warn
+                    elif resolved_uid is None and filter_user_id is None:
+                        # Only warn about unresolved names when syncing for self
+                        # (no filter). When syncing a specific member we only care
+                        # that their own entry is captured — other names are noise.
                         if bot_username not in unresolved_bot_names:
                             unresolved_bot_names.append(bot_username)
                 if msg.get("reply_count", 0) > 0:
@@ -445,8 +447,9 @@ class SlackIngester:
                                         user_id=r_resolved,
                                     ):
                                         saved += 1
-                                elif r_resolved is None and r_bot_username not in unresolved_bot_names:
-                                    unresolved_bot_names.append(r_bot_username)
+                                elif r_resolved is None and filter_user_id is None:
+                                    if r_bot_username not in unresolved_bot_names:
+                                        unresolved_bot_names.append(r_bot_username)
                         elif self._is_relevant(reply, filter_user_id):
                             # Regular user reply in thread — capture if relevant
                             reply_sender = reply.get("user", "")
