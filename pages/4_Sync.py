@@ -376,12 +376,19 @@ all_member_names = list(team_options.keys())
 if "sync_member_select" not in st.session_state:
     st.session_state["sync_member_select"] = [all_member_names[0]]
 
-_sel_col1, _sel_col2, _sel_col3 = st.columns([6, 1, 1])
+_self_label = all_member_names[0]  # always the "(me)" entry
+_team_only_names = [n for n in all_member_names if n != _self_label]
+
+_sel_col1, _sel_col2, _sel_col3, _sel_col4 = st.columns([5, 1, 1, 1])
 with _sel_col2:
-    if st.button("All", use_container_width=True, help="Select all team members"):
+    if st.button("All", use_container_width=True, help="Select everyone including yourself"):
         st.session_state["sync_member_select"] = all_member_names
         st.rerun()
 with _sel_col3:
+    if st.button("Team", use_container_width=True, help="Select all team members (exclude yourself)"):
+        st.session_state["sync_member_select"] = _team_only_names
+        st.rerun()
+with _sel_col4:
     if st.button("Clear", use_container_width=True, help="Clear selection"):
         st.session_state["sync_member_select"] = []
         st.rerun()
