@@ -28,6 +28,7 @@ from app.models.user import User, UserGitHubLink
 from app.models.slack_token import SlackUserToken
 from app.ingestion.slack_ingester import SlackIngester
 from app.ingestion.github_ingester import GitHubIngester
+from app.normalization.normalizer import normalize_slack_messages, normalize_github_activities
 
 st.set_page_config(page_title="Sync Data", page_icon="🔄", layout="wide")
 
@@ -105,10 +106,14 @@ async def _run_slack_sync(slack_user_id: str, team_id: str, days_back: int) -> d
                 except Exception as e:
                     await db.rollback()
                     errors.append(f"#{channel_name}: {e}")
+
+            # Normalize raw SlackMessages → WorkUnits in one pass after all channels
+            normalized = await normalize_slack_messages(db, team_id=team_id)
+            await db.commit()
         finally:
             await ingester.close()
 
-    return {"messages": total, "channels": channels_synced, "errors": errors}
+    return {"messages": total, "channels": channels_synced, "normalized": normalized, "errors": errors}
 
 
 async def _run_github_sync(slack_user_id: str, slack_team_id: str, days_back: int) -> dict:
@@ -139,6 +144,10 @@ async def _run_github_sync(slack_user_id: str, slack_team_id: str, days_back: in
                 slack_user_id=slack_user_id,
                 since=since,
             )
+            await db.commit()
+
+            # Normalize raw GitHubActivity → WorkUnits immediately
+            await normalize_github_activities(db, team_id=slack_team_id)
             await db.commit()
         finally:
             await ingester.close()
@@ -200,7 +209,8 @@ if st.button("Sync Slack", type="primary"):
             result = run(_run_slack_sync(slack_user_id, slack_team_id, days_slack))
             st.success(
                 f"✅ Synced **{result['messages']}** new messages "
-                f"across **{result['channels']}** channels."
+                f"across **{result['channels']}** channels "
+                f"({result['normalized']} normalized into work units)."
             )
             if result["errors"]:
                 with st.expander(f"{len(result['errors'])} channel(s) had errors"):

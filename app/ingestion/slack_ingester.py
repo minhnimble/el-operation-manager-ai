@@ -100,6 +100,76 @@ class SlackIngester:
             if not cursor or not data.get("has_more"):
                 break
 
+    async def iter_thread_replies(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        oldest: float | None = None,
+    ) -> AsyncIterator[dict]:
+        """Fetch all user replies in a thread (skips the parent message itself)."""
+        cursor = None
+        while True:
+            params: dict = {"channel": channel_id, "ts": thread_ts, "limit": 200}
+            if oldest:
+                params["oldest"] = str(oldest)
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                data = await self._get("conversations.replies", params)
+            except RuntimeError as e:
+                if "thread_not_found" in str(e):
+                    return
+                raise
+
+            for msg in data.get("messages", []):
+                # Skip the parent message (ts == thread_ts) — we handle it separately
+                if msg.get("ts") == thread_ts:
+                    continue
+                yield msg
+
+            cursor = data.get("response_metadata", {}).get("next_cursor")
+            if not cursor or not data.get("has_more"):
+                break
+
+    async def _save_message(
+        self,
+        db: AsyncSession,
+        msg: dict,
+        channel_id: str,
+        channel_name: str,
+        is_standup: bool,
+        is_reply: bool,
+    ) -> bool:
+        """Persist a single Slack message. Returns True if newly saved."""
+        user_id = msg.get("user")
+        if not user_id:
+            return False
+
+        ts = msg.get("ts", "")
+        existing = await db.execute(
+            select(SlackMessage).where(SlackMessage.message_ts == ts)
+        )
+        if existing.scalar_one_or_none():
+            return False
+
+        thread_ts = msg.get("thread_ts")
+        record = SlackMessage(
+            slack_team_id=self.team_id,
+            slack_user_id=user_id,
+            channel_id=channel_id,
+            channel_name=channel_name,
+            message_ts=ts,
+            thread_ts=thread_ts,
+            text=msg.get("text", ""),
+            is_standup_channel=is_standup,
+            is_thread_reply=is_reply,
+            raw_payload=msg,
+            timestamp=datetime.utcfromtimestamp(float(ts)),
+        )
+        db.add(record)
+        return True
+
     async def backfill_channel(
         self,
         db: AsyncSession,
@@ -108,45 +178,40 @@ class SlackIngester:
         slack_user_id: str,
         oldest: datetime | None = None,
     ) -> int:
-        """Backfill a channel into SlackMessage table. Returns count saved."""
+        """Backfill a channel into SlackMessage table. Returns count saved.
+
+        Also fetches thread replies so that standup-bot threads (where the bot
+        posts the question at the top level and users reply in the thread) are
+        captured correctly.
+        """
         is_standup = _is_standup_channel(channel_name)
         oldest_ts = oldest.timestamp() if oldest else None
         saved = 0
 
         async for msg in self.iter_channel_messages(channel_id, oldest=oldest_ts):
             subtype = msg.get("subtype")
-            if subtype in {"bot_message", "channel_join", "channel_leave", "channel_purpose"}:
-                continue
-            user_id = msg.get("user")
-            if not user_id:
-                continue
-
             ts = msg.get("ts", "")
 
-            existing = await db.execute(
-                select(SlackMessage).where(SlackMessage.message_ts == ts)
-            )
-            if existing.scalar_one_or_none():
-                continue
+            # Save real-user top-level messages (skip channel events and bot prompts)
+            if subtype not in {"bot_message", "channel_join", "channel_leave", "channel_purpose"}:
+                if await self._save_message(
+                    db, msg, channel_id, channel_name,
+                    is_standup=is_standup, is_reply=False,
+                ):
+                    saved += 1
 
-            thread_ts = msg.get("thread_ts")
-            is_reply = thread_ts is not None and thread_ts != ts
-
-            record = SlackMessage(
-                slack_team_id=self.team_id,
-                slack_user_id=user_id,
-                channel_id=channel_id,
-                channel_name=channel_name,
-                message_ts=ts,
-                thread_ts=thread_ts,
-                text=msg.get("text", ""),
-                is_standup_channel=is_standup,
-                is_thread_reply=is_reply,
-                raw_payload=msg,
-                timestamp=datetime.utcfromtimestamp(float(ts)),
-            )
-            db.add(record)
-            saved += 1
+            # If this message has thread replies (common for standup bots that post
+            # a question and collect answers in a thread), fetch those replies too.
+            if msg.get("reply_count", 0) > 0:
+                async for reply in self.iter_thread_replies(channel_id, ts, oldest_ts):
+                    reply_subtype = reply.get("subtype", "")
+                    if reply_subtype in {"channel_join", "channel_leave"}:
+                        continue
+                    if await self._save_message(
+                        db, reply, channel_id, channel_name,
+                        is_standup=is_standup, is_reply=True,
+                    ):
+                        saved += 1
 
         await db.flush()
         logger.info("Backfilled %d messages from #%s", saved, channel_name)

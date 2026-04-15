@@ -27,7 +27,10 @@ _GITHUB_TYPE_MAP: dict[str, WorkUnitType] = {
 
 
 def _classify_slack_message(msg: SlackMessage) -> WorkUnitType:
-    if msg.is_standup_channel and not msg.is_thread_reply:
+    # Standup bots often post a question at the top level and collect responses
+    # in the thread — both the top-level reply AND thread replies in a standup
+    # channel should be classified as STANDUP.
+    if msg.is_standup_channel:
         return WorkUnitType.STANDUP
     if msg.is_thread_reply:
         return WorkUnitType.THREAD_REPLY
