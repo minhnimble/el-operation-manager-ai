@@ -370,14 +370,36 @@ st.markdown("---")
 
 self_name = st.session_state.get("slack_display_name", slack_user_id)
 team_options = run(_get_team_options(slack_user_id, slack_team_id, self_name))
+all_member_names = list(team_options.keys())
 
-selected_name = st.selectbox(
-    "Sync for",
-    options=list(team_options.keys()),
-    help="Slack sync always captures all team members. GitHub sync targets this member specifically.",
-)
-target_user_id = team_options[selected_name]
-is_self = target_user_id == slack_user_id
+# Initialise to just "myself" on first load
+if "sync_member_select" not in st.session_state:
+    st.session_state["sync_member_select"] = [all_member_names[0]]
+
+_sel_col1, _sel_col2, _sel_col3 = st.columns([6, 1, 1])
+with _sel_col2:
+    if st.button("All", use_container_width=True, help="Select all team members"):
+        st.session_state["sync_member_select"] = all_member_names
+        st.rerun()
+with _sel_col3:
+    if st.button("Clear", use_container_width=True, help="Clear selection"):
+        st.session_state["sync_member_select"] = []
+        st.rerun()
+with _sel_col1:
+    selected_names: list[str] = st.multiselect(
+        "Sync for",
+        options=all_member_names,
+        key="sync_member_select",
+        help="Select one or more members. Slack sync uses your token for all members. "
+             "GitHub sync skips members who haven't connected their GitHub account.",
+    )
+
+if not selected_names:
+    st.info("Select at least one team member above to sync.")
+    st.stop()
+
+target_users: list[tuple[str, str]] = [(name, team_options[name]) for name in selected_names]
+is_batch = len(selected_names) > 1
 
 st.markdown("---")
 
@@ -385,15 +407,20 @@ st.markdown("---")
 
 st.subheader("Slack")
 
-if is_self:
+if is_batch:
+    st.caption(
+        f"Will sync Slack messages for **{len(selected_names)} members** one by one, "
+        "using **your** Slack token for all of them."
+    )
+elif team_options[selected_names[0]] == slack_user_id:
     st.caption(
         "Pulls messages from all public channels you are a member of. "
         "Messages from **all team members** in those channels are captured automatically."
     )
 else:
     st.caption(
-        f"Slack sync always uses **your** token and captures messages from every user in your channels — "
-        f"including **{selected_name}**. No separate token needed."
+        f"Slack sync uses **your** token and filters messages attributed to "
+        f"**{selected_names[0]}**. No separate token needed."
     )
 
 _slack_col1, _slack_col2 = st.columns([3, 1])
@@ -420,215 +447,222 @@ with _slack_btn_col2:
 if sync_normal_clicked or sync_standup_clicked:
     slack_sync_mode = "normal" if sync_normal_clicked else "standup"
     oldest = datetime.utcnow() - timedelta(days=days_slack)
-    total_msgs = 0
-    errors: list[str] = []
+    grand_total_msgs = 0
+    all_slack_errors: list[str] = []
 
-    # Progress bar lives OUTSIDE st.status so it stays visible while the
-    # status log is expanded or collapsed.
-    slack_progress = st.progress(0, text="Connecting to Slack…")
-    slack_status_text = st.empty()
+    overall_slack_progress = st.progress(
+        0, text=f"Starting Slack {slack_sync_mode} sync for {len(target_users)} member(s)…"
+    )
 
-    with st.status("Sync log", expanded=True) as status:
-        # Step 1 — fetch token + resolve channels
+    # ── Fetch token once ──────────────────────────────────────────────────────
+    try:
+        access_token = run(_get_slack_token(slack_user_id, slack_team_id))
+    except Exception as e:
+        overall_slack_progress.empty()
+        st.error(str(e))
+        st.stop()
+
+    # ── For normal sync: discover channels once, reuse per member ─────────────
+    base_channels: list[dict] = []
+    if slack_sync_mode == "normal":
         try:
-            st.write("🔑 Fetching Slack token…")
-            access_token = run(_get_slack_token(slack_user_id, slack_team_id))
-
-            if slack_sync_mode == "standup":
-                # ── Standup: skip full channel discovery, look up by name directly ──
-                st.write(
-                    f"📋 Looking up standup channel(s): "
-                    + ", ".join(f"**#{n}**" for n in sorted(_ALWAYS_INCLUDE_CHANNELS))
-                    + "…"
-                )
-                channels = run(_get_standup_channels(access_token, slack_team_id))
-                if not channels:
-                    st.warning("No standup channels found — check that the channel names in `_ALWAYS_INCLUDE_CHANNELS` are correct.")
-                else:
-                    names_found = ", ".join(f"#**{ch.get('name', ch['id'])}**" for ch in channels)
-                    st.write(f"  → Found {names_found}.")
-            else:
-                # ── Normal: full channel discovery + ignore list + member filter ──
-                st.write("📋 Loading joined channels…")
+            with st.spinner("Loading joined channels…"):
                 all_channels, ch_warnings = run(_get_slack_channels(access_token, slack_team_id))
-
-                for w in ch_warnings:
-                    st.warning(w)
-
-                public_ch  = [c for c in all_channels if not c.get("is_private")]
-                private_ch = [c for c in all_channels if c.get("is_private")]
-                total = len(all_channels)
-
-                # Apply ignore list
-                channels = [
-                    ch for ch in all_channels
-                    if not _should_skip_channel(ch.get("name", ""))
-                ]
-                skipped = total - len(channels)
-
-                # Print the raw totals first so every subsequent number makes sense
-                skip_note = f", **{skipped}** ignored" if skipped else ""
-                st.write(
-                    f"Found **{len(public_ch)}** public + **{len(private_ch)}** private "
-                    f"= **{total}** channel(s){skip_note} → **{len(channels)}** to check."
-                )
-
-                # Exclude standup channels from normal sync
-                channels = [
-                    ch for ch in channels
-                    if ch.get("name", "").lower() not in _ALWAYS_INCLUDE_CHANNELS
-                ]
-
-                # When syncing a specific team member, filter to channels they're in.
-                if target_user_id != slack_user_id:
-                    st.write(
-                        f"Checking which of those **{len(channels)}** channel(s) "
-                        f"**{selected_name}** is a member of…"
-                    )
-                    channels = run(
-                        _filter_channels_by_member(access_token, slack_team_id, channels, target_user_id)
-                    )
-                    st.write(f"  → **{selected_name}** is in **{len(channels)}** — syncing those.")
-
+            for w in ch_warnings:
+                st.warning(w)
+            base_channels = [
+                ch for ch in all_channels
+                if not _should_skip_channel(ch.get("name", ""))
+                and ch.get("name", "").lower() not in _ALWAYS_INCLUDE_CHANNELS
+            ]
+            total_ch  = len(all_channels)
+            standup_ch = sum(
+                1 for c in all_channels
+                if c.get("name", "").lower() in _ALWAYS_INCLUDE_CHANNELS
+            )
+            skipped_ch = total_ch - len(base_channels) - standup_ch
+            st.caption(
+                f"Found **{total_ch}** joined channel(s) → "
+                f"**{len(base_channels)}** to sync"
+                + (f" ({skipped_ch} ignored)" if skipped_ch else "") + "."
+            )
         except Exception as e:
-            slack_progress.empty()
-            slack_status_text.empty()
-            status.update(label="Failed to connect to Slack", state="error")
+            overall_slack_progress.empty()
             st.error(str(e))
             st.stop()
 
-        # Step 2 — sync each channel
-        n = max(len(channels), 1)
-        unresolved_standup_names: list[str] = []
-        for i, ch in enumerate(channels):
-            ch_id   = ch["id"]
-            ch_name = ch.get("name", ch_id)
-            pct     = int(i / n * 90)            # reserve last 10 % for normalization
-            slack_progress.progress(pct, text=f"Syncing #{ch_name}… ({i + 1}/{n})")
-            slack_status_text.caption(f"⏳ #{ch_name}")
-            st.write(f"📥 #{ch_name}")
-
-            # Filter to target user's messages when syncing a team member
-            member_filter = target_user_id if target_user_id != slack_user_id else None
-            count, err, unresolved = run(
-                _sync_slack_channel(
-                    access_token, slack_team_id, slack_user_id,
-                    ch_id, ch_name, oldest,
-                    filter_user_id=member_filter,
-                )
-            )
-            if err:
-                errors.append(f"#{ch_name}: {err}")
-                st.write(f"  ⚠️ {err}")
-            else:
-                total_msgs += count
-                if count:
-                    st.write(f"  ✓ {count} new message(s)")
-                if unresolved:
-                    for name in unresolved:
-                        if name not in unresolved_standup_names:
-                            unresolved_standup_names.append(name)
-                    st.write(
-                        f"  ⚠️ Standup bot name(s) not matched to any team member: "
-                        + ", ".join(f"**{u}**" for u in unresolved)
-                    )
-
-        # Step 3 — normalize
-        slack_progress.progress(92, text="Normalizing work units…")
-        slack_status_text.caption("⏳ Normalizing…")
-        st.write("🔄 Normalizing raw messages into work units…")
-        normalized = run(_normalize_slack(slack_team_id))
-        st.write(f"  ✓ {normalized} work unit(s) created.")
-
-        slack_progress.progress(100, text="Done ✓")
-        slack_status_text.empty()
-        mode_label = "normal messages" if slack_sync_mode == "normal" else "daily standup"
-        label = (
-            f"✅ Slack sync complete ({mode_label}) — {total_msgs} new messages, {normalized} work units"
-            + (f" · {len(errors)} error(s)" if errors else "")
+    # ── Per-member sync loop ───────────────────────────────────────────────────
+    for member_idx, (member_name, target_user_id) in enumerate(target_users):
+        is_self_member = target_user_id == slack_user_id
+        overall_slack_progress.progress(
+            int(member_idx / len(target_users) * 95),
+            text=f"Member {member_idx + 1}/{len(target_users)}: {member_name}…",
         )
-        status.update(label=label, state="complete")
 
-    if errors:
-        with st.expander(f"{len(errors)} channel(s) had errors"):
-            for err in errors:
+        total_msgs   = 0
+        member_errors: list[str] = []
+
+        with st.status(
+            f"{'👤 ' if is_batch else ''}{member_name}",
+            expanded=(member_idx == 0),
+        ) as member_status:
+            try:
+                if slack_sync_mode == "standup":
+                    st.write("📋 Looking up standup channel(s)…")
+                    channels = run(_get_standup_channels(access_token, slack_team_id))
+                    if channels:
+                        st.write("  → " + ", ".join(f"#**{c.get('name', c['id'])}**" for c in channels))
+                    else:
+                        st.warning("No standup channels found.")
+                else:
+                    if is_self_member:
+                        channels = base_channels
+                        st.write(f"Using all **{len(channels)}** channel(s).")
+                    else:
+                        st.write(f"Filtering channels for **{member_name}**…")
+                        channels = run(
+                            _filter_channels_by_member(
+                                access_token, slack_team_id, base_channels, target_user_id
+                            )
+                        )
+                        st.write(f"  → **{len(channels)}** channel(s).")
+
+                n = max(len(channels), 1)
+                ch_progress = st.progress(0, text="Starting…")
+
+                for i, ch in enumerate(channels):
+                    ch_id   = ch["id"]
+                    ch_name = ch.get("name", ch_id)
+                    ch_progress.progress(int(i / n * 90), text=f"#{ch_name} ({i + 1}/{n})")
+                    st.write(f"📥 #{ch_name}")
+
+                    member_filter = None if is_self_member else target_user_id
+                    count, err, unresolved = run(
+                        _sync_slack_channel(
+                            access_token, slack_team_id, slack_user_id,
+                            ch_id, ch_name, oldest,
+                            filter_user_id=member_filter,
+                        )
+                    )
+                    if err:
+                        member_errors.append(f"#{ch_name}: {err}")
+                        st.write(f"  ⚠️ {err}")
+                    else:
+                        total_msgs += count
+                        if count:
+                            st.write(f"  ✓ {count} new message(s)")
+                        if unresolved:
+                            st.write(
+                                "  ⚠️ Unmatched standup names: "
+                                + ", ".join(f"**{u}**" for u in unresolved)
+                            )
+
+                ch_progress.progress(100, text="Done ✓")
+
+            except Exception as e:
+                member_errors.append(str(e))
+                st.error(str(e))
+
+            grand_total_msgs  += total_msgs
+            all_slack_errors.extend(member_errors)
+
+            status_label = (
+                f"{'✅' if not member_errors else '⚠️'} {member_name} — {total_msgs} message(s)"
+                + (f" · {len(member_errors)} error(s)" if member_errors else "")
+            )
+            member_status.update(
+                label=status_label,
+                state="complete" if not member_errors else "error",
+            )
+
+    # ── Normalize once across the whole team ──────────────────────────────────
+    overall_slack_progress.progress(97, text="Normalizing work units…")
+    normalized_slack = run(_normalize_slack(slack_team_id))
+    overall_slack_progress.progress(100, text="Done ✓")
+
+    mode_label = "normal messages" if slack_sync_mode == "normal" else "daily standup"
+    st.success(
+        f"✅ Slack sync complete ({mode_label}) — "
+        f"**{grand_total_msgs}** new message(s), **{normalized_slack}** work unit(s) "
+        f"across **{len(target_users)}** member(s)"
+        + (f" · {len(all_slack_errors)} error(s)" if all_slack_errors else "")
+    )
+    if all_slack_errors:
+        with st.expander(f"{len(all_slack_errors)} error(s)"):
+            for err in all_slack_errors:
                 st.warning(err)
 
-# ─── Clean up stale channel data ──────────────────────────────────────────────
+# ─── Clean up stale channel data (single member only) ─────────────────────────
 
-with st.expander("🗑️ Clean up stale channel data", expanded=False):
-    st.caption(
-        "Removes **SlackMessages** and **WorkUnits** that were synced for "
-        f"**{selected_name}** but belong to channels they are no longer (or never were) "
-        "a member of. Run this after adjusting the ignore list or team membership."
-    )
-
-    _ck_preview = f"_cleanup_preview_{target_user_id}"
-    _ck_valid   = f"_cleanup_valid_{target_user_id}"
-    _ck_confirm = f"_cleanup_confirm_{target_user_id}"
-
-    # ── Step 1: Preview button ─────────────────────────────────────────────────
-    if st.button("Preview stale data", key=f"preview_cleanup_{target_user_id}"):
-        # Clear any prior confirm state when re-previewing
-        st.session_state.pop(_ck_confirm, None)
-        try:
-            access_token_cleanup = run(_get_slack_token(slack_user_id, slack_team_id))
-            with st.spinner("Checking which channels are valid for this user…"):
-                valid_ids, valid_names = run(
-                    _get_valid_channel_ids(access_token_cleanup, slack_team_id, target_user_id)
-                )
-                msg_c, wu_c = run(
-                    _count_stale_slack_data(target_user_id, slack_team_id, valid_ids)
-                )
-            st.session_state[_ck_valid]   = valid_ids
-            st.session_state[_ck_preview] = (msg_c, wu_c, valid_names)
-        except Exception as e:
-            st.error(f"Could not load channels: {e}")
-
-    # ── Step 2: Show preview results ───────────────────────────────────────────
-    if _ck_preview in st.session_state:
-        msg_c, wu_c, valid_names = st.session_state[_ck_preview]
-        valid_ids = st.session_state.get(_ck_valid, [])
-
-        ch_list = ", ".join(f"#{n}" for n in valid_names[:10])
-        overflow = f" … and {len(valid_names) - 10} more" if len(valid_names) > 10 else ""
-        st.info(
-            f"**{selected_name}** is a member of **{len(valid_names)}** synced channel(s): "
-            f"{ch_list}{overflow}"
+if not is_batch:
+    single_name, single_user_id = target_users[0]
+    with st.expander("🗑️ Clean up stale channel data", expanded=False):
+        st.caption(
+            "Removes **SlackMessages** and **WorkUnits** that were synced for "
+            f"**{single_name}** but belong to channels they are no longer (or never were) "
+            "a member of. Run this after adjusting the ignore list or team membership."
         )
 
-        if msg_c == 0 and wu_c == 0:
-            st.success("✅ No stale data found — everything looks clean.")
-        else:
-            st.warning(
-                f"Found **{msg_c}** SlackMessage(s) and **{wu_c}** WorkUnit(s) "
-                "outside those channels."
+        _ck_preview = f"_cleanup_preview_{single_user_id}"
+        _ck_valid   = f"_cleanup_valid_{single_user_id}"
+        _ck_confirm = f"_cleanup_confirm_{single_user_id}"
+
+        if st.button("Preview stale data", key=f"preview_cleanup_{single_user_id}"):
+            st.session_state.pop(_ck_confirm, None)
+            try:
+                access_token_cleanup = run(_get_slack_token(slack_user_id, slack_team_id))
+                with st.spinner("Checking which channels are valid for this user…"):
+                    valid_ids, valid_names = run(
+                        _get_valid_channel_ids(access_token_cleanup, slack_team_id, single_user_id)
+                    )
+                    msg_c, wu_c = run(
+                        _count_stale_slack_data(single_user_id, slack_team_id, valid_ids)
+                    )
+                st.session_state[_ck_valid]   = valid_ids
+                st.session_state[_ck_preview] = (msg_c, wu_c, valid_names)
+            except Exception as e:
+                st.error(f"Could not load channels: {e}")
+
+        if _ck_preview in st.session_state:
+            msg_c, wu_c, valid_names = st.session_state[_ck_preview]
+            valid_ids = st.session_state.get(_ck_valid, [])
+
+            ch_list  = ", ".join(f"#{n}" for n in valid_names[:10])
+            overflow = f" … and {len(valid_names) - 10} more" if len(valid_names) > 10 else ""
+            st.info(
+                f"**{single_name}** is a member of **{len(valid_names)}** synced channel(s): "
+                f"{ch_list}{overflow}"
             )
 
-            # ── Step 3: Confirm delete button ─────────────────────────────────
-            if not st.session_state.get(_ck_confirm):
-                if st.button(
-                    f"⚠️ Delete {msg_c} messages + {wu_c} work units",
-                    type="primary",
-                    key=f"confirm_cleanup_{target_user_id}",
-                ):
-                    st.session_state[_ck_confirm] = True
-                    st.rerun()
+            if msg_c == 0 and wu_c == 0:
+                st.success("✅ No stale data found — everything looks clean.")
             else:
-                # Execute the deletion
-                try:
-                    del_msgs, del_wus = run(
-                        _delete_stale_slack_data(target_user_id, slack_team_id, valid_ids)
-                    )
-                    st.success(
-                        f"🗑️ Deleted **{del_msgs}** SlackMessage(s) and "
-                        f"**{del_wus}** WorkUnit(s) from stale channels."
-                    )
-                except Exception as e:
-                    st.error(f"Deletion failed: {e}")
-                finally:
-                    for k in (_ck_preview, _ck_valid, _ck_confirm):
-                        st.session_state.pop(k, None)
+                st.warning(
+                    f"Found **{msg_c}** SlackMessage(s) and **{wu_c}** WorkUnit(s) "
+                    "outside those channels."
+                )
+                if not st.session_state.get(_ck_confirm):
+                    if st.button(
+                        f"⚠️ Delete {msg_c} messages + {wu_c} work units",
+                        type="primary",
+                        key=f"confirm_cleanup_{single_user_id}",
+                    ):
+                        st.session_state[_ck_confirm] = True
+                        st.rerun()
+                else:
+                    try:
+                        del_msgs, del_wus = run(
+                            _delete_stale_slack_data(single_user_id, slack_team_id, valid_ids)
+                        )
+                        st.success(
+                            f"🗑️ Deleted **{del_msgs}** SlackMessage(s) and "
+                            f"**{del_wus}** WorkUnit(s) from stale channels."
+                        )
+                    except Exception as e:
+                        st.error(f"Deletion failed: {e}")
+                    finally:
+                        for k in (_ck_preview, _ck_valid, _ck_confirm):
+                            st.session_state.pop(k, None)
 
 st.markdown("---")
 
@@ -636,23 +670,28 @@ st.markdown("---")
 
 st.subheader("GitHub")
 
-has_token, gh_login = run(_get_github_link_info(target_user_id, slack_team_id))
+# Check GitHub connectivity for every selected member
+gh_info: dict[str, tuple[bool, str]] = {}
+for _name, _uid in target_users:
+    _has_tok, _login = run(_get_github_link_info(_uid, slack_team_id))
+    gh_info[_name] = (_has_tok, _login)
 
-if not has_token:
-    if is_self:
-        st.caption("You have not connected your GitHub account yet.")
-        st.page_link("pages/1_Connect.py", label="Connect GitHub on the Connect Accounts page")
+members_with_gh = [(n, u) for n, u in target_users if gh_info[n][0]]
+members_no_gh   = [(n, u) for n, u in target_users if not gh_info[n][0]]
+
+if members_no_gh:
+    skipped_str = ", ".join(f"**{n}**" for n, _ in members_no_gh)
+    if members_with_gh:
+        st.warning(f"⚠️ No GitHub token — will skip: {skipped_str}")
     else:
-        st.caption(
-            f"**{selected_name}** has not connected their GitHub account via OAuth. "
-            f"Ask them to visit the **Connect Accounts** page and link their GitHub."
-        )
-    st.button("Sync GitHub", type="primary", disabled=True)
-else:
-    if is_self:
-        st.caption(f"Pulls commits, PRs, reviews, and issues from your repositories (@{gh_login}).")
-    else:
-        st.caption(f"Syncing GitHub for **{selected_name}** (@{gh_login}).")
+        st.warning(f"None of the selected members have connected GitHub: {skipped_str}")
+        if any(u == slack_user_id for _, u in target_users):
+            st.page_link("pages/1_Connect.py", label="Connect GitHub on the Connect Accounts page")
+        st.button("Sync GitHub", type="primary", disabled=True)
+
+if members_with_gh:
+    gh_list = ", ".join(f"**{n}** (@{gh_info[n][1]})" for n, _ in members_with_gh)
+    st.caption(f"Will sync: {gh_list}")
 
     _gh_col1, _gh_col2 = st.columns([3, 1])
     with _gh_col1:
@@ -665,61 +704,79 @@ else:
 
     if st.button("Sync GitHub", type="primary"):
         since = datetime.utcnow() - timedelta(days=days_github)
-        total_counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
+        grand_gh_counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
 
-        gh_progress = st.progress(0, text="Connecting to GitHub…")
-        gh_status_text = st.empty()
+        overall_gh_progress = st.progress(
+            0, text=f"Starting GitHub sync for {len(members_with_gh)} member(s)…"
+        )
 
-        with st.status("Sync log", expanded=True) as status:
-            try:
-                st.write("🔑 Fetching credentials…")
-                gh_token, github_login = run(_get_github_credentials(target_user_id, slack_team_id))
-                st.write(f"📋 Loading repositories for @{github_login}…")
-                repos = run(_get_github_repos(gh_token, github_login))
-                st.write(f"Found **{len(repos)}** repository(ies) to scan.")
-            except Exception as e:
-                gh_progress.empty()
-                gh_status_text.empty()
-                status.update(label="Failed to connect to GitHub", state="error")
-                st.error(str(e))
-                st.stop()
-
-            # Step 2 — sync each repo
-            n = max(len(repos), 1)
-            for i, repo in enumerate(repos):
-                repo_name = repo["full_name"]
-                pct = int(i / n * 90)
-                gh_progress.progress(pct, text=f"Scanning {repo_name}… ({i + 1}/{n})")
-                gh_status_text.caption(f"⏳ {repo_name}")
-                st.write(f"📦 {repo_name}")
-
-                try:
-                    counts = run(
-                        _sync_github_repo(gh_token, github_login, slack_team_id, target_user_id, repo, since)
-                    )
-                    added = sum(counts.values())
-                    if added:
-                        parts = ", ".join(f"{v} {k}" for k, v in counts.items() if v)
-                        st.write(f"  ✓ {parts}")
-                    for k, v in counts.items():
-                        total_counts[k] = total_counts.get(k, 0) + v
-                except Exception as e:
-                    st.write(f"  ⚠️ {e}")
-
-            # Step 3 — normalize
-            gh_progress.progress(92, text="Normalizing work units…")
-            gh_status_text.caption("⏳ Normalizing…")
-            st.write("🔄 Normalizing GitHub activity into work units…")
-            normalized = run(_normalize_github(slack_team_id))
-            st.write(f"  ✓ {normalized} work unit(s) created.")
-
-            gh_progress.progress(100, text="Done ✓")
-            gh_status_text.empty()
-            summary = ", ".join(f"{v} {k}" for k, v in total_counts.items() if v) or "nothing new"
-            status.update(
-                label=f"✅ GitHub sync complete — {summary}, {normalized} work units",
-                state="complete",
+        for member_idx, (member_name, target_user_id) in enumerate(members_with_gh):
+            gh_login_display = gh_info[member_name][1]
+            overall_gh_progress.progress(
+                int(member_idx / len(members_with_gh) * 95),
+                text=f"Member {member_idx + 1}/{len(members_with_gh)}: {member_name}…",
             )
+
+            with st.status(
+                f"{'👤 ' if is_batch else ''}{member_name} (@{gh_login_display})",
+                expanded=(member_idx == 0),
+            ) as member_gh_status:
+                try:
+                    st.write("🔑 Fetching credentials…")
+                    gh_token, github_login = run(_get_github_credentials(target_user_id, slack_team_id))
+                    st.write(f"📋 Loading repos for @{github_login}…")
+                    repos = run(_get_github_repos(gh_token, github_login))
+                    st.write(f"Found **{len(repos)}** repo(s).")
+
+                    total_counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
+                    n = max(len(repos), 1)
+                    repo_progress = st.progress(0, text="Scanning repos…")
+
+                    for i, repo in enumerate(repos):
+                        repo_name = repo["full_name"]
+                        repo_progress.progress(int(i / n * 100), text=f"{repo_name} ({i + 1}/{n})")
+                        st.write(f"📦 {repo_name}")
+                        try:
+                            counts = run(
+                                _sync_github_repo(
+                                    gh_token, github_login, slack_team_id,
+                                    target_user_id, repo, since,
+                                )
+                            )
+                            added = sum(counts.values())
+                            if added:
+                                parts = ", ".join(f"{v} {k}" for k, v in counts.items() if v)
+                                st.write(f"  ✓ {parts}")
+                            for k, v in counts.items():
+                                total_counts[k]  = total_counts.get(k, 0) + v
+                                grand_gh_counts[k] = grand_gh_counts.get(k, 0) + v
+                        except Exception as e:
+                            st.write(f"  ⚠️ {e}")
+
+                    repo_progress.progress(100, text="Done ✓")
+                    member_summary = (
+                        ", ".join(f"{v} {k}" for k, v in total_counts.items() if v)
+                        or "nothing new"
+                    )
+                    member_gh_status.update(
+                        label=f"✅ {member_name} — {member_summary}", state="complete"
+                    )
+
+                except Exception as e:
+                    member_gh_status.update(label=f"❌ {member_name} — failed", state="error")
+                    st.error(str(e))
+
+        overall_gh_progress.progress(97, text="Normalizing work units…")
+        normalized_gh = run(_normalize_github(slack_team_id))
+        overall_gh_progress.progress(100, text="Done ✓")
+
+        grand_summary = (
+            ", ".join(f"{v} {k}" for k, v in grand_gh_counts.items() if v) or "nothing new"
+        )
+        st.success(
+            f"✅ GitHub sync complete — {grand_summary}, **{normalized_gh}** work unit(s) "
+            f"across **{len(members_with_gh)}** member(s)"
+        )
 
 st.markdown("---")
 
