@@ -1,3 +1,4 @@
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
@@ -5,37 +6,45 @@ from app.config import get_settings
 
 settings = get_settings()
 
-# ── Prepared-statement safety for Supabase Transaction Pooler ─────────────────
-#
-# Supabase's Transaction Pooler (PgBouncer, pool_mode=transaction) routes each
-# transaction to an arbitrary server connection.  Named server-side prepared
-# statements survive on a connection after the transaction ends, so when
-# PgBouncer hands that connection to a different client the duplicate name
-# causes DuplicatePreparedStatementError.
-#
-# Two independent caches must both be zeroed:
-#
-#   connect_args  statement_cache_size=0
-#       → asyncpg's own client-side LRU cache.  With the cache disabled,
-#         asyncpg no longer remembers prepared statement handles between calls.
-#
-#   prepared_statement_cache_size=0   (SQLAlchemy dialect kwarg)
-#       → SQLAlchemy's asyncpg adapter cache.  When this is 0, the adapter
-#         passes name=None to asyncpg's prepare(), which tells PostgreSQL to
-#         use an *unnamed* prepared statement.  Unnamed statements are
-#         overwritten on re-use instead of raising a duplicate-name error.
-#
-# Both settings are safe for direct (non-pooler) connections: unnamed prepared
-# statements perform identically to named ones; the only trade-off is a minor
-# reduction in client-side caching efficiency.
 engine = create_async_engine(
     settings.database_url,
     pool_size=settings.database_pool_size,
     max_overflow=5,
     echo=not settings.is_production,
+    # asyncpg-level: disable client-side prepared statement LRU cache.
     connect_args={"statement_cache_size": 0},
-    prepared_statement_cache_size=0,
 )
+
+
+# ── PgBouncer / Supabase Transaction Pooler compatibility ─────────────────────
+#
+# The Transaction Pooler routes each transaction to an arbitrary server
+# connection.  Named server-side prepared statements persist on that
+# connection and cause DuplicatePreparedStatementError when PgBouncer
+# hands the same connection to another client that tries the same name.
+#
+# Two things must be zeroed out — they live at different layers:
+#
+#   asyncpg  (connect_args statement_cache_size=0, above)
+#     → stops asyncpg from caching PreparedStatement handles client-side.
+#
+#   SQLAlchemy asyncpg adapter  (_prepared_statement_cache_size / name func)
+#     → SQLAlchemy generates its own named statements independently.
+#       Setting _prepared_statement_cache_size=0 makes its adapter call
+#       asyncpg.prepare(name=None), which PostgreSQL treats as an *unnamed*
+#       prepared statement.  Unnamed statements are silently overwritten on
+#       each use instead of raising a duplicate-name error.
+#
+# create_async_engine() does not accept prepared_statement_cache_size as a
+# kwarg in all 2.0.x builds, so we patch each connection via an event.
+@event.listens_for(engine.sync_engine, "connect")
+def _patch_asyncpg_for_pgbouncer(dbapi_connection, _connection_record):
+    # Zero the SQLAlchemy-layer cache size so the name function is consulted
+    # on every statement execution (no SQLAlchemy-level reuse).
+    dbapi_connection._prepared_statement_cache_size = 0
+    # Return None → asyncpg calls prepare(name=None) → unnamed statement.
+    dbapi_connection._prepared_statement_name_func = lambda: None
+
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
