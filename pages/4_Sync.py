@@ -88,7 +88,7 @@ async def _get_slack_token(slack_user_id: str, team_id: str) -> str:
         return record.access_token
 
 
-async def _get_slack_channels(access_token: str, team_id: str) -> list[dict]:
+async def _get_slack_channels(access_token: str, team_id: str) -> tuple[list[dict], list[str]]:
     ingester = SlackIngester(user_token=access_token, team_id=team_id)
     try:
         return await ingester.get_joined_channels()
@@ -271,7 +271,13 @@ if st.button("Sync Slack", type="primary"):
             access_token = run(_get_slack_token(slack_user_id, slack_team_id))
 
             st.write("📋 Loading joined channels…")
-            all_channels = run(_get_slack_channels(access_token, slack_team_id))
+            all_channels, ch_warnings = run(_get_slack_channels(access_token, slack_team_id))
+
+            for w in ch_warnings:
+                st.warning(w)
+
+            public_ch  = [c for c in all_channels if not c.get("is_private")]
+            private_ch = [c for c in all_channels if c.get("is_private")]
 
             # Apply ignore list
             channels = [
@@ -279,8 +285,11 @@ if st.button("Sync Slack", type="primary"):
                 if not _should_skip_channel(ch.get("name", ""))
             ]
             skipped = len(all_channels) - len(channels)
-            skip_note = f" ({skipped} ignored)" if skipped else ""
-            st.write(f"Found **{len(channels)}** channel(s) to sync{skip_note}.")
+            skip_note = f", {skipped} ignored" if skipped else ""
+            st.write(
+                f"Found **{len(public_ch)}** public + **{len(private_ch)}** private "
+                f"= **{len(channels)}** channel(s) to sync{skip_note}."
+            )
         except Exception as e:
             slack_progress.empty()
             slack_status_text.empty()

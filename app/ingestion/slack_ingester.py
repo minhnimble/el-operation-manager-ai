@@ -56,62 +56,58 @@ class SlackIngester:
             raise RuntimeError(f"Slack API error [{endpoint}]: {data.get('error')}")
         return data
 
-    async def _list_channels(self, types: str) -> list[dict]:
-        """Paginate conversations.list for the given channel types."""
+    async def _paginate_channels(self, channel_type: str) -> list[dict]:
+        """Fetch one channel type at a time — more reliable than mixing types."""
         channels = []
         cursor = None
         while True:
             params: dict = {
-                "types": types,
+                "types": channel_type,
                 "exclude_archived": "true",
                 "limit": 200,
             }
             if cursor:
                 params["cursor"] = cursor
             data = await self._get("conversations.list", params)
-            for ch in data["channels"]:
-                # Public channels: only include ones the user has joined.
-                # Private channels: the API already returns only channels the
-                # user is a member of, but is_member can be False/absent in
-                # the response, so we include all private channels returned.
-                if ch.get("is_private"):
-                    channels.append(ch)
-                elif ch.get("is_member"):
+            for ch in data.get("channels", []):
+                # Public: only joined ones (is_member distinguishes joined vs not).
+                # Private: API already filters to member-only channels, but
+                # is_member is unreliable — include everything returned.
+                if ch.get("is_private") or ch.get("is_member"):
                     channels.append(ch)
             cursor = data.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
         return channels
 
-    async def get_joined_channels(self) -> list[dict]:
-        """Return all public + private channels the authenticated user is a member of.
+    async def get_joined_channels(self) -> tuple[list[dict], list[str]]:
+        """Return (channels, warnings).
 
-        Falls back to public-only if the token lacks the groups:read scope
-        needed for private channels.
+        Makes separate API calls for public and private channels — mixing
+        types in a single call doesn't reliably return private channels.
+        Warnings describe any scope issues so the caller can surface them.
         """
+        warnings: list[str] = []
+
+        # Public channels — requires channels:read
+        public = await self._paginate_channels("public_channel")
+
+        # Private channels — requires groups:read (listing) + groups:history (reading)
+        private: list[dict] = []
         try:
-            return await self._list_channels("public_channel,private_channel")
-        except Exception as e:
-            # Unwrap RetryError to get the real cause
-            cause = getattr(e, "last_attempt", None)
-            if cause is not None:
-                try:
-                    cause = cause.result()
-                except Exception as inner:
-                    cause = inner
-            else:
-                cause = e
-
-            err_str = str(cause).lower()
-            if any(kw in err_str for kw in ("missing_scope", "not_allowed", "invalid_types")):
-                logger.warning(
-                    "Token lacks groups:read scope — falling back to public channels only. "
-                    "Reconnect Slack with the groups:read scope to include private channels."
+            private = await self._paginate_channels("private_channel")
+        except RuntimeError as e:
+            err = str(e).lower()
+            if any(kw in err for kw in ("missing_scope", "not_allowed", "invalid_types")):
+                warnings.append(
+                    "Private channels skipped — token is missing `groups:read` scope. "
+                    "Add it in your Slack app, then use **Reconnect Slack** on Connect Accounts."
                 )
-                return await self._list_channels("public_channel")
+                logger.warning("groups:read scope missing — skipping private channels")
+            else:
+                raise
 
-            # Any other error: re-raise with the real message, not the RetryError wrapper
-            raise RuntimeError(str(cause)) from None
+        return public + private, warnings
 
     async def iter_channel_messages(
         self,
@@ -132,9 +128,16 @@ class SlackIngester:
             try:
                 data = await self._get("conversations.history", params)
             except RuntimeError as e:
-                if "not_in_channel" in str(e) or "channel_not_found" in str(e):
-                    logger.warning("Cannot access channel %s, skipping", channel_id)
+                err = str(e).lower()
+                if any(kw in err for kw in ("not_in_channel", "channel_not_found")):
+                    logger.warning("Cannot access channel %s (not a member), skipping", channel_id)
                     return
+                if "missing_scope" in err:
+                    # Private channel history requires groups:history scope
+                    raise RuntimeError(
+                        f"Missing scope for #{channel_id} — add `groups:history` to your "
+                        f"Slack app scopes and reconnect."
+                    ) from None
                 raise
 
             for msg in data.get("messages", []):

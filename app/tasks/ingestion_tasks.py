@@ -58,7 +58,7 @@ async def _async_backfill(slack_user_id: str, team_id: str, days_back: int) -> N
 
         ingester = SlackIngester(user_token=token_record.access_token, team_id=team_id)
         try:
-            channels = await ingester.get_joined_channels()
+            channels, _warnings = await ingester.get_joined_channels()
             oldest = datetime.utcnow() - timedelta(days=days_back)
 
             for channel in channels:
