@@ -33,6 +33,21 @@ from app.normalization.normalizer import normalize_slack_messages, normalize_git
 
 st.set_page_config(page_title="Sync Data", page_icon="🔄", layout="wide")
 
+# ── Channel ignore list ────────────────────────────────────────────────────────
+
+_IGNORED_CHANNEL_EXACT = {"access-requests", "nimble-code-war"}
+_IGNORED_CHANNEL_SUFFIXES = ("-activity", "-corner")
+_IGNORED_CHANNEL_PREFIXES = ("ic-",)
+
+
+def _should_skip_channel(name: str) -> bool:
+    n = name.lower()
+    return (
+        n in _IGNORED_CHANNEL_EXACT
+        or n.endswith(_IGNORED_CHANNEL_SUFFIXES)
+        or n.startswith(_IGNORED_CHANNEL_PREFIXES)
+    )
+
 
 def run(coro):
     return asyncio.run(coro)
@@ -244,28 +259,43 @@ if st.button("Sync Slack", type="primary"):
     total_msgs = 0
     errors: list[str] = []
 
-    # Step 1 — fetch token + channel list
-    with st.status("Connecting to Slack…", expanded=True) as status:
+    # Progress bar lives OUTSIDE st.status so it stays visible while the
+    # status log is expanded or collapsed.
+    slack_progress = st.progress(0, text="Connecting to Slack…")
+    slack_status_text = st.empty()
+
+    with st.status("Sync log", expanded=True) as status:
+        # Step 1 — fetch token + channel list
         try:
-            st.write("🔑 Fetching token…")
+            st.write("🔑 Fetching Slack token…")
             access_token = run(_get_slack_token(slack_user_id, slack_team_id))
+
             st.write("📋 Loading joined channels…")
-            channels = run(_get_slack_channels(access_token, slack_team_id))
-            st.write(f"Found **{len(channels)}** channel(s) to sync.")
+            all_channels = run(_get_slack_channels(access_token, slack_team_id))
+
+            # Apply ignore list
+            channels = [
+                ch for ch in all_channels
+                if not _should_skip_channel(ch.get("name", ""))
+            ]
+            skipped = len(all_channels) - len(channels)
+            skip_note = f" ({skipped} ignored)" if skipped else ""
+            st.write(f"Found **{len(channels)}** channel(s) to sync{skip_note}.")
         except Exception as e:
+            slack_progress.empty()
+            slack_status_text.empty()
             status.update(label="Failed to connect to Slack", state="error")
             st.error(str(e))
             st.stop()
 
         # Step 2 — sync each channel
-        progress = st.progress(0, text="Starting…")
-        n = len(channels)
-
+        n = max(len(channels), 1)
         for i, ch in enumerate(channels):
             ch_id   = ch["id"]
             ch_name = ch.get("name", ch_id)
-            frac    = i / n
-            progress.progress(frac, text=f"Syncing #{ch_name}… ({i}/{n})")
+            pct     = int(i / n * 90)            # reserve last 10 % for normalization
+            slack_progress.progress(pct, text=f"Syncing #{ch_name}… ({i + 1}/{n})")
+            slack_status_text.caption(f"⏳ #{ch_name}")
             st.write(f"📥 #{ch_name}")
 
             count, err = run(
@@ -273,22 +303,24 @@ if st.button("Sync Slack", type="primary"):
             )
             if err:
                 errors.append(f"#{ch_name}: {err}")
-                st.write(f"  ⚠️ Error: {err}")
+                st.write(f"  ⚠️ {err}")
             else:
                 total_msgs += count
                 if count:
                     st.write(f"  ✓ {count} new message(s)")
 
         # Step 3 — normalize
-        progress.progress(0.95, text="Normalizing work units…")
+        slack_progress.progress(92, text="Normalizing work units…")
+        slack_status_text.caption("⏳ Normalizing…")
         st.write("🔄 Normalizing raw messages into work units…")
         normalized = run(_normalize_slack(slack_team_id))
         st.write(f"  ✓ {normalized} work unit(s) created.")
 
-        progress.progress(1.0, text="Done")
+        slack_progress.progress(100, text="Done ✓")
+        slack_status_text.empty()
         label = (
             f"✅ Slack sync complete — {total_msgs} new messages, {normalized} work units"
-            + (f" ({len(errors)} error(s))" if errors else "")
+            + (f" · {len(errors)} error(s)" if errors else "")
         )
         status.update(label=label, state="complete")
 
@@ -327,7 +359,10 @@ else:
         since = datetime.utcnow() - timedelta(days=days_github)
         total_counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
 
-        with st.status("Connecting to GitHub…", expanded=True) as status:
+        gh_progress = st.progress(0, text="Connecting to GitHub…")
+        gh_status_text = st.empty()
+
+        with st.status("Sync log", expanded=True) as status:
             try:
                 st.write("🔑 Fetching credentials…")
                 gh_token, github_login = run(_get_github_credentials(target_user_id, slack_team_id))
@@ -335,18 +370,19 @@ else:
                 repos = run(_get_github_repos(gh_token, github_login))
                 st.write(f"Found **{len(repos)}** repository(ies) to scan.")
             except Exception as e:
+                gh_progress.empty()
+                gh_status_text.empty()
                 status.update(label="Failed to connect to GitHub", state="error")
                 st.error(str(e))
                 st.stop()
 
             # Step 2 — sync each repo
-            progress = st.progress(0, text="Starting…")
-            n = len(repos)
-
+            n = max(len(repos), 1)
             for i, repo in enumerate(repos):
                 repo_name = repo["full_name"]
-                frac = i / n if n else 1.0
-                progress.progress(frac, text=f"Scanning {repo_name}… ({i}/{n})")
+                pct = int(i / n * 90)
+                gh_progress.progress(pct, text=f"Scanning {repo_name}… ({i + 1}/{n})")
+                gh_status_text.caption(f"⏳ {repo_name}")
                 st.write(f"📦 {repo_name}")
 
                 try:
@@ -363,12 +399,14 @@ else:
                     st.write(f"  ⚠️ {e}")
 
             # Step 3 — normalize
-            progress.progress(0.95, text="Normalizing work units…")
+            gh_progress.progress(92, text="Normalizing work units…")
+            gh_status_text.caption("⏳ Normalizing…")
             st.write("🔄 Normalizing GitHub activity into work units…")
             normalized = run(_normalize_github(slack_team_id))
             st.write(f"  ✓ {normalized} work unit(s) created.")
 
-            progress.progress(1.0, text="Done")
+            gh_progress.progress(100, text="Done ✓")
+            gh_status_text.empty()
             summary = ", ".join(f"{v} {k}" for k, v in total_counts.items() if v) or "nothing new"
             status.update(
                 label=f"✅ GitHub sync complete — {summary}, {normalized} work units",

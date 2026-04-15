@@ -61,7 +61,7 @@ class SlackIngester:
         cursor = None
         while True:
             params: dict = {
-                "types": "public_channel",
+                "types": "public_channel,private_channel",
                 "exclude_archived": "true",
                 "limit": 200,
             }
