@@ -30,6 +30,35 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def _oauth_button(label: str, url: str, primary: bool = True) -> None:
+    """Render an OAuth redirect button that navigates in the same browser tab.
+
+    st.link_button always opens a new tab which creates a duplicate tab after
+    the OAuth callback returns.  Using a plain <a target="_self"> avoids that.
+    """
+    if primary:
+        bg, fg, border = "#ff4b4b", "#ffffff", "#ff4b4b"   # Streamlit red primary
+    else:
+        bg, fg, border = "transparent", "#31333f", "#d0d0d0"  # secondary style
+
+    st.markdown(
+        f"""<a href="{url}" target="_self" style="
+            display:inline-block;
+            padding:0.4rem 1.1rem;
+            background:{bg};
+            color:{fg};
+            border:1px solid {border};
+            border-radius:0.4rem;
+            font-size:0.95rem;
+            font-weight:500;
+            text-decoration:none;
+            cursor:pointer;
+            line-height:1.6;
+        ">{label}</a>""",
+        unsafe_allow_html=True,
+    )
+
+
 async def _disconnect_slack(slack_user_id: str, slack_team_id: str) -> None:
     async with AsyncSessionLocal() as db:
         await db.execute(
@@ -100,12 +129,12 @@ if slack_user_id:
 
     state = secrets.token_urlsafe(12)
     slack_auth_url = build_auth_url(state=state)
-    st.link_button("Reconnect Slack (refresh token / scopes)", slack_auth_url, use_container_width=False)
+    _oauth_button("Reconnect Slack (refresh token / scopes)", slack_auth_url, primary=False)
 else:
     st.info("Sign in with Slack to allow the app to read your channel messages.")
     state = secrets.token_urlsafe(12)
     slack_auth_url = build_auth_url(state=state)
-    st.link_button("Sign in with Slack", slack_auth_url, use_container_width=False)
+    _oauth_button("Sign in with Slack", slack_auth_url)
 
 st.markdown("---")
 
@@ -133,7 +162,7 @@ else:
             f"&state={github_state}"
             f"&redirect_uri={settings.app_base_url}"
         )
-        st.link_button("Reconnect GitHub (refresh token / scopes)", github_url)
+        _oauth_button("Reconnect GitHub (refresh token / scopes)", github_url, primary=False)
     else:
         st.info("Link your GitHub account to enable commit and PR tracking.")
         github_state = f"github:{slack_team_id}:{slack_user_id}"
@@ -144,7 +173,7 @@ else:
             f"&state={github_state}"
             f"&redirect_uri={settings.app_base_url}"
         )
-        st.link_button("Connect GitHub", github_url, use_container_width=False)
+        _oauth_button("Connect GitHub", github_url)
 
 st.markdown("---")
 
