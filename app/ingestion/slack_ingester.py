@@ -239,6 +239,53 @@ class SlackIngester:
 
     # ── Name → user-id resolution (for bot-posted standup summaries) ───────────
 
+    async def _get_names_for_user(self, db: AsyncSession, user_id: str) -> set[str]:
+        """Return all known lowercased name variants for a given slack_user_id.
+
+        Used as a fast pre-filter: when filter_user_id is set we only run the
+        full _resolve_user_by_name query when the bot username is in this set,
+        skipping all the expensive lookups for other team members' names.
+        """
+        from app.models.team_member import TeamMember
+        from app.models.user import User
+
+        names: set[str] = set()
+
+        result = await db.execute(
+            select(
+                TeamMember.member_display_name,
+                TeamMember.member_real_name,
+            ).where(
+                TeamMember.member_slack_team_id == self.team_id,
+                TeamMember.member_slack_user_id == user_id,
+            ).limit(1)
+        )
+        row = result.one_or_none()
+        if row:
+            if row.member_display_name:
+                names.add(row.member_display_name.strip().lower())
+            if row.member_real_name:
+                names.add(row.member_real_name.strip().lower())
+
+        result = await db.execute(
+            select(
+                User.slack_display_name,
+                User.slack_real_name,
+            ).where(
+                User.slack_team_id == self.team_id,
+                User.slack_user_id == user_id,
+            ).limit(1)
+        )
+        row = result.one_or_none()
+        if row:
+            if row.slack_display_name:
+                names.add(row.slack_display_name.strip().lower())
+            if row.slack_real_name:
+                names.add(row.slack_real_name.strip().lower())
+
+        names.discard("")
+        return names
+
     async def _resolve_user_by_name(
         self, db: AsyncSession, display_name: str
     ) -> str | None:
@@ -413,6 +460,17 @@ class SlackIngester:
         saved = 0
         unresolved_bot_names: list[str] = []
 
+        # Pre-load target user's known names so we can skip name resolution for
+        # every other team member's bot messages in standup channels.
+        # When filter_user_id is None (EM syncing for self) we resolve everyone.
+        target_names: set[str] | None = None
+        if filter_user_id and is_standup:
+            target_names = await self._get_names_for_user(db, filter_user_id)
+            logger.info(
+                "Standup name filter for user %s in #%s: %s",
+                filter_user_id, channel_name, target_names,
+            )
+
         async for msg in self.iter_channel_messages(channel_id, oldest=oldest_ts):
             subtype = msg.get("subtype", "")
             ts = msg.get("ts", "")
@@ -428,7 +486,12 @@ class SlackIngester:
                     or msg.get("user_profile", {}).get("display_name", "")
                 ).strip()
                 if bot_username:
-                    resolved_uid = await self._resolve_user_by_name(db, bot_username)
+                    # Skip resolution entirely if target_names is set and this
+                    # username clearly belongs to someone else.
+                    if target_names is not None and bot_username.lower() not in target_names:
+                        resolved_uid = None
+                    else:
+                        resolved_uid = await self._resolve_user_by_name(db, bot_username)
                     logger.info(
                         "Standup bot message in #%s: username=%r → resolved_uid=%s "
                         "(filter_user_id=%s)",
@@ -468,7 +531,10 @@ class SlackIngester:
                                 or reply.get("user_profile", {}).get("display_name", "")
                             ).strip()
                             if r_bot_username:
-                                r_resolved = await self._resolve_user_by_name(db, r_bot_username)
+                                if target_names is not None and r_bot_username.lower() not in target_names:
+                                    r_resolved = None
+                                else:
+                                    r_resolved = await self._resolve_user_by_name(db, r_bot_username)
                                 logger.info(
                                     "Standup thread reply in #%s: username=%r → resolved=%s",
                                     channel_name, r_bot_username, r_resolved,
@@ -532,7 +598,10 @@ class SlackIngester:
                             or reply.get("user_profile", {}).get("display_name", "")
                         ).strip()
                         if bot_username:
-                            resolved_uid = await self._resolve_user_by_name(db, bot_username)
+                            if target_names is not None and bot_username.lower() not in target_names:
+                                resolved_uid = None
+                            else:
+                                resolved_uid = await self._resolve_user_by_name(db, bot_username)
                             uid_matches = (
                                 resolved_uid is not None
                                 and (filter_user_id is None or resolved_uid == filter_user_id)
