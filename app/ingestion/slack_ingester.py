@@ -69,7 +69,15 @@ class SlackIngester:
             if cursor:
                 params["cursor"] = cursor
             data = await self._get("conversations.list", params)
-            channels.extend(ch for ch in data["channels"] if ch.get("is_member"))
+            for ch in data["channels"]:
+                # Public channels: only include ones the user has joined.
+                # Private channels: the API already returns only channels the
+                # user is a member of, but is_member can be False/absent in
+                # the response, so we include all private channels returned.
+                if ch.get("is_private"):
+                    channels.append(ch)
+                elif ch.get("is_member"):
+                    channels.append(ch)
             cursor = data.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
