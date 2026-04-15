@@ -92,6 +92,109 @@ class GitHubIngester:
             params["since"] = since.isoformat() + "Z"
         return await self._paginate(f"/repos/{repo_full_name}/issues", params)
 
+    async def ingest_single_repo(
+        self,
+        db: AsyncSession,
+        slack_team_id: str,
+        slack_user_id: str,
+        repo: dict,
+        since: datetime | None = None,
+    ) -> dict[str, int]:
+        """Ingest activity for a single repo. Returns counts by type."""
+        counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
+        repo_name = repo["full_name"]
+
+        # Commits
+        try:
+            commits = await self.get_commits(repo_name, since=since)
+            for commit in commits:
+                sha = commit["sha"]
+                await self._upsert_activity(
+                    db,
+                    slack_team_id=slack_team_id,
+                    slack_user_id=slack_user_id,
+                    activity_type="commit",
+                    repo_full_name=repo_name,
+                    ref_id=sha,
+                    title=commit["commit"]["message"].split("\n")[0][:512],
+                    url=commit["html_url"],
+                    raw_payload=commit,
+                    activity_at=datetime.fromisoformat(
+                        commit["commit"]["author"]["date"].replace("Z", "+00:00")
+                    ).replace(tzinfo=None),
+                )
+                counts["commits"] += 1
+        except Exception as e:
+            logger.warning("Failed commits for %s: %s", repo_name, e)
+
+        # Pull Requests + Reviews
+        try:
+            prs = await self.get_pull_requests(repo_name)
+            for pr in prs:
+                if pr["user"]["login"] != self.github_login:
+                    continue
+                if since and datetime.fromisoformat(
+                    pr["created_at"].replace("Z", "+00:00")
+                ).replace(tzinfo=None) < since:
+                    continue
+
+                pr_type = "pr_merged" if pr.get("merged_at") else "pr_opened"
+                await self._upsert_activity(
+                    db,
+                    slack_team_id=slack_team_id,
+                    slack_user_id=slack_user_id,
+                    activity_type=pr_type,
+                    repo_full_name=repo_name,
+                    ref_id=str(pr["number"]),
+                    title=pr["title"][:512],
+                    url=pr["html_url"],
+                    raw_payload={
+                        "number": pr["number"],
+                        "title": pr["title"],
+                        "state": pr["state"],
+                        "draft": pr.get("draft"),
+                        "labels": [l["name"] for l in pr.get("labels", [])],
+                        "created_at": pr["created_at"],
+                        "merged_at": pr.get("merged_at"),
+                    },
+                    activity_at=datetime.fromisoformat(
+                        pr["created_at"].replace("Z", "+00:00")
+                    ).replace(tzinfo=None),
+                )
+                counts["prs"] += 1
+
+                reviews = await self.get_pr_reviews(repo_name, pr["number"])
+                for review in reviews:
+                    if review["user"]["login"] != self.github_login:
+                        continue
+                    review_key = f"{pr['number']}-{review['id']}"
+                    await self._upsert_activity(
+                        db,
+                        slack_team_id=slack_team_id,
+                        slack_user_id=slack_user_id,
+                        activity_type="pr_review",
+                        repo_full_name=repo_name,
+                        ref_id=review_key,
+                        title=f"Review on PR #{pr['number']}: {pr['title'][:400]}",
+                        url=review.get("html_url", pr["html_url"]),
+                        raw_payload={
+                            "pr_number": pr["number"],
+                            "state": review["state"],
+                            "submitted_at": review.get("submitted_at"),
+                        },
+                        activity_at=datetime.fromisoformat(
+                            review["submitted_at"].replace("Z", "+00:00")
+                        ).replace(tzinfo=None)
+                        if review.get("submitted_at")
+                        else datetime.utcnow(),
+                    )
+                    counts["reviews"] += 1
+
+        except Exception as e:
+            logger.warning("Failed PRs for %s: %s", repo_name, e)
+
+        return counts
+
     async def ingest_user_activity(
         self,
         db: AsyncSession,

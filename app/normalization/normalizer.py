@@ -55,6 +55,19 @@ async def normalize_slack_messages(
 
     created = 0
     for msg in messages:
+        # Dedup: skip if a WorkUnit already exists for this Slack message timestamp.
+        # Covers the case where a previous sync committed the WorkUnit but crashed
+        # before marking the SlackMessage as processed.
+        existing_wu = await db.execute(
+            select(WorkUnit.id).where(WorkUnit.slack_message_ts == msg.message_ts)
+        )
+        if existing_wu.scalar_one_or_none() is not None:
+            # WorkUnit already exists — just mark the raw record processed and move on.
+            await db.execute(
+                update(SlackMessage).where(SlackMessage.id == msg.id).values(processed=True)
+            )
+            continue
+
         wu_type = _classify_slack_message(msg)
         text = msg.text or ""
         title = text[:100] + ("..." if len(text) > 100 else "")
@@ -107,6 +120,21 @@ async def normalize_github_activities(
     created = 0
     for act in activities:
         wu_type = _GITHUB_TYPE_MAP.get(act.activity_type, WorkUnitType.COMMIT)
+
+        # Dedup: skip if a WorkUnit already exists for this GitHub ref.
+        existing_wu = await db.execute(
+            select(WorkUnit.id).where(
+                WorkUnit.github_ref_id == act.ref_id,
+                WorkUnit.github_repo == act.repo_full_name,
+                WorkUnit.type == wu_type,
+            )
+        )
+        if existing_wu.scalar_one_or_none() is not None:
+            await db.execute(
+                update(GitHubActivity).where(GitHubActivity.id == act.id).values(processed=True)
+            )
+            continue
+
         work_unit = WorkUnit(
             slack_user_id=act.slack_user_id,
             slack_team_id=act.slack_team_id,

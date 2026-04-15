@@ -3,6 +3,14 @@ Slack Ingester — pulls messages from Slack using a user OAuth token.
 
 Uses conversations.history to backfill channels the user is a member of.
 No bot app or event subscriptions required.
+
+Standup handling covers two common bot patterns:
+  1. Bot posts question top-level; users reply in-thread with their own account.
+     → Thread replies have a real `user` field — captured via conversations.replies.
+  2. Bot collects answers privately then re-posts them as bot_messages with the
+     user's full name as the `username` override (e.g. Geekbot style).
+     → We match `username` against TeamMember / User display names to attribute
+       the message to the correct Slack user ID.
 """
 
 import logging
@@ -11,7 +19,7 @@ from typing import AsyncIterator
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.models.raw_data import SlackMessage
@@ -60,7 +68,6 @@ class SlackIngester:
             if cursor:
                 params["cursor"] = cursor
             data = await self._get("conversations.list", params)
-            # Filter to channels the user has joined
             channels.extend(
                 ch for ch in data["channels"] if ch.get("is_member")
             )
@@ -123,7 +130,7 @@ class SlackIngester:
                 raise
 
             for msg in data.get("messages", []):
-                # Skip the parent message (ts == thread_ts) — we handle it separately
+                # Skip the parent message (ts == thread_ts) — handled separately
                 if msg.get("ts") == thread_ts:
                     continue
                 yield msg
@@ -131,6 +138,68 @@ class SlackIngester:
             cursor = data.get("response_metadata", {}).get("next_cursor")
             if not cursor or not data.get("has_more"):
                 break
+
+    # ── Name → user-id resolution (for bot-posted standup summaries) ───────────
+
+    async def _resolve_user_by_name(
+        self, db: AsyncSession, display_name: str
+    ) -> str | None:
+        """Look up a Slack user ID by display or real name.
+
+        Checks TeamMember records for this workspace, then signed-in Users.
+        Returns the first matching slack_user_id, or None.
+        """
+        # Import here to avoid circular imports at module level
+        from app.models.team_member import TeamMember
+        from app.models.user import User
+
+        name_lower = display_name.strip().lower()
+        if not name_lower:
+            return None
+
+        # TeamMember display name
+        result = await db.execute(
+            select(TeamMember.member_slack_user_id).where(
+                TeamMember.member_slack_team_id == self.team_id,
+                func.lower(TeamMember.member_display_name) == name_lower,
+            ).limit(1)
+        )
+        uid = result.scalar_one_or_none()
+        if uid:
+            return uid
+
+        # TeamMember real name
+        result = await db.execute(
+            select(TeamMember.member_slack_user_id).where(
+                TeamMember.member_slack_team_id == self.team_id,
+                func.lower(TeamMember.member_real_name) == name_lower,
+            ).limit(1)
+        )
+        uid = result.scalar_one_or_none()
+        if uid:
+            return uid
+
+        # Signed-in User (display name)
+        result = await db.execute(
+            select(User.slack_user_id).where(
+                User.slack_team_id == self.team_id,
+                func.lower(User.slack_display_name) == name_lower,
+            ).limit(1)
+        )
+        uid = result.scalar_one_or_none()
+        if uid:
+            return uid
+
+        # Signed-in User (real name)
+        result = await db.execute(
+            select(User.slack_user_id).where(
+                User.slack_team_id == self.team_id,
+                func.lower(User.slack_real_name) == name_lower,
+            ).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    # ── Message persistence ────────────────────────────────────────────────────
 
     async def _save_message(
         self,
@@ -140,13 +209,21 @@ class SlackIngester:
         channel_name: str,
         is_standup: bool,
         is_reply: bool,
+        user_id: str | None = None,
     ) -> bool:
-        """Persist a single Slack message. Returns True if newly saved."""
-        user_id = msg.get("user")
-        if not user_id:
+        """Persist a single Slack message. Returns True if newly saved.
+
+        `user_id` overrides msg['user'] — used when attributing bot-posted
+        standup summaries to the real author via name resolution.
+        """
+        uid = user_id or msg.get("user")
+        if not uid:
             return False
 
         ts = msg.get("ts", "")
+        if not ts:
+            return False
+
         existing = await db.execute(
             select(SlackMessage).where(SlackMessage.message_ts == ts)
         )
@@ -156,7 +233,7 @@ class SlackIngester:
         thread_ts = msg.get("thread_ts")
         record = SlackMessage(
             slack_team_id=self.team_id,
-            slack_user_id=user_id,
+            slack_user_id=uid,
             channel_id=channel_id,
             channel_name=channel_name,
             message_ts=ts,
@@ -180,38 +257,91 @@ class SlackIngester:
     ) -> int:
         """Backfill a channel into SlackMessage table. Returns count saved.
 
-        Also fetches thread replies so that standup-bot threads (where the bot
-        posts the question at the top level and users reply in the thread) are
-        captured correctly.
+        Handles two standup-bot patterns:
+        - Thread replies: bot asks question top-level; users reply in-thread
+          with their own Slack account → captured via conversations.replies.
+        - Bot-reposted summaries: bot reposts the user's answer as a
+          bot_message with username=<user's full name> → we resolve the name
+          to a TeamMember / User slack_user_id.
         """
         is_standup = _is_standup_channel(channel_name)
         oldest_ts = oldest.timestamp() if oldest else None
         saved = 0
 
         async for msg in self.iter_channel_messages(channel_id, oldest=oldest_ts):
-            subtype = msg.get("subtype")
+            subtype = msg.get("subtype", "")
             ts = msg.get("ts", "")
 
-            # Save real-user top-level messages (skip channel events and bot prompts)
-            if subtype not in {"bot_message", "channel_join", "channel_leave", "channel_purpose"}:
+            # ── Skip non-content events ──────────────────────────────────────
+            if subtype in {"channel_join", "channel_leave", "channel_purpose"}:
+                continue
+
+            # ── Bot-posted standup summaries (Geekbot-style) ─────────────────
+            # The bot posts with username=<member's full name> and no `user` field.
+            if subtype == "bot_message" and is_standup:
+                bot_username = (
+                    msg.get("username")
+                    or msg.get("user_profile", {}).get("display_name", "")
+                ).strip()
+                if bot_username:
+                    resolved_uid = await self._resolve_user_by_name(db, bot_username)
+                    if resolved_uid:
+                        if await self._save_message(
+                            db, msg, channel_id, channel_name,
+                            is_standup=True, is_reply=False,
+                            user_id=resolved_uid,
+                        ):
+                            saved += 1
+                # Don't fall through — handled above (or intentionally skipped)
+                # Still fetch thread replies on this bot message if any
+                if msg.get("reply_count", 0) > 0:
+                    async for reply in self.iter_thread_replies(channel_id, ts, oldest_ts):
+                        if reply.get("subtype", "") in {"channel_join", "channel_leave"}:
+                            continue
+                        reply_uid = reply.get("user")
+                        if reply_uid:
+                            if await self._save_message(
+                                db, reply, channel_id, channel_name,
+                                is_standup=is_standup, is_reply=True,
+                            ):
+                                saved += 1
+                continue
+
+            # ── Regular user messages ────────────────────────────────────────
+            if subtype not in {"bot_message"}:
                 if await self._save_message(
                     db, msg, channel_id, channel_name,
                     is_standup=is_standup, is_reply=False,
                 ):
                     saved += 1
 
-            # If this message has thread replies (common for standup bots that post
-            # a question and collect answers in a thread), fetch those replies too.
+            # Fetch thread replies for any message that has them
             if msg.get("reply_count", 0) > 0:
                 async for reply in self.iter_thread_replies(channel_id, ts, oldest_ts):
-                    reply_subtype = reply.get("subtype", "")
-                    if reply_subtype in {"channel_join", "channel_leave"}:
+                    if reply.get("subtype", "") in {"channel_join", "channel_leave"}:
                         continue
-                    if await self._save_message(
-                        db, reply, channel_id, channel_name,
-                        is_standup=is_standup, is_reply=True,
-                    ):
-                        saved += 1
+                    # Bot replies in threads: try name resolution in standup channels
+                    reply_subtype = reply.get("subtype", "")
+                    if reply_subtype == "bot_message" and is_standup:
+                        bot_username = (
+                            reply.get("username")
+                            or reply.get("user_profile", {}).get("display_name", "")
+                        ).strip()
+                        if bot_username:
+                            resolved_uid = await self._resolve_user_by_name(db, bot_username)
+                            if resolved_uid:
+                                if await self._save_message(
+                                    db, reply, channel_id, channel_name,
+                                    is_standup=True, is_reply=True,
+                                    user_id=resolved_uid,
+                                ):
+                                    saved += 1
+                    elif not reply_subtype or reply_subtype not in {"bot_message"}:
+                        if await self._save_message(
+                            db, reply, channel_id, channel_name,
+                            is_standup=is_standup, is_reply=True,
+                        ):
+                            saved += 1
 
         await db.flush()
         logger.info("Backfilled %d messages from #%s", saved, channel_name)

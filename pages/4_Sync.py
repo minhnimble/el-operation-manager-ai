@@ -2,7 +2,8 @@
 Sync Data page.
 
 Syncs run directly in the Streamlit session (no Celery/Redis required).
-This works on Streamlit Cloud and local dev alike.
+Progress is shown per-channel (Slack) and per-repo (GitHub) by breaking
+each sync into small asyncio.run() steps so the UI can update between them.
 
 Slack sync uses the EM's own token and captures messages from every author
 in every joined channel — no member selector needed for Slack.
@@ -37,7 +38,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
-# ── Team selector helper ───────────────────────────────────────────────────────
+# ── Team selector ─────────────────────────────────────────────────────────────
 
 async def _get_team_options(manager_user_id: str, manager_team_id: str, self_name: str) -> dict[str, str]:
     options: dict[str, str] = {f"{self_name} (me)": manager_user_id}
@@ -53,21 +54,10 @@ async def _get_team_options(manager_user_id: str, manager_team_id: str, self_nam
     return options
 
 
-async def _get_github_link(slack_user_id: str, slack_team_id: str) -> UserGitHubLink | None:
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(UserGitHubLink).where(
-                UserGitHubLink.slack_user_id == slack_user_id,
-                UserGitHubLink.slack_team_id == slack_team_id,
-            )
-        )
-        return result.scalar_one_or_none()
+# ── Slack helpers (one asyncio.run() per step) ────────────────────────────────
 
-
-# ── Sync functions (run directly, no Celery) ──────────────────────────────────
-
-async def _run_slack_sync(slack_user_id: str, team_id: str, days_back: int) -> dict:
-    """Backfill all joined Slack channels using the EM's token."""
+async def _get_slack_token(slack_user_id: str, team_id: str) -> str:
+    """Returns the raw access token string, or raises."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(SlackUserToken).where(
@@ -75,49 +65,61 @@ async def _run_slack_sync(slack_user_id: str, team_id: str, days_back: int) -> d
                 SlackUserToken.slack_team_id == team_id,
             )
         )
-        token_record = result.scalar_one_or_none()
-        if not token_record:
+        record = result.scalar_one_or_none()
+        if not record:
             raise RuntimeError(
                 "No Slack token found. Please reconnect your Slack account on the Connect Accounts page."
             )
+        return record.access_token
 
-        ingester = SlackIngester(user_token=token_record.access_token, team_id=team_id)
-        oldest = datetime.utcnow() - timedelta(days=days_back)
-        total = 0
-        channels_synced = 0
-        errors = []
 
+async def _get_slack_channels(access_token: str, team_id: str) -> list[dict]:
+    ingester = SlackIngester(user_token=access_token, team_id=team_id)
+    try:
+        return await ingester.get_joined_channels()
+    finally:
+        await ingester.close()
+
+
+async def _sync_slack_channel(
+    access_token: str,
+    team_id: str,
+    slack_user_id: str,
+    channel_id: str,
+    channel_name: str,
+    oldest: datetime,
+) -> tuple[int, str | None]:
+    """Sync one channel. Returns (messages_saved, error_or_None)."""
+    async with AsyncSessionLocal() as db:
+        ingester = SlackIngester(user_token=access_token, team_id=team_id)
         try:
-            channels = await ingester.get_joined_channels()
-            for channel in channels:
-                channel_id = channel["id"]
-                channel_name = channel.get("name", channel_id)
-                try:
-                    count = await ingester.backfill_channel(
-                        db=db,
-                        channel_id=channel_id,
-                        channel_name=channel_name,
-                        slack_user_id=slack_user_id,
-                        oldest=oldest,
-                    )
-                    await db.commit()
-                    total += count
-                    channels_synced += 1
-                except Exception as e:
-                    await db.rollback()
-                    errors.append(f"#{channel_name}: {e}")
-
-            # Normalize raw SlackMessages → WorkUnits in one pass after all channels
-            normalized = await normalize_slack_messages(db, team_id=team_id)
+            count = await ingester.backfill_channel(
+                db=db,
+                channel_id=channel_id,
+                channel_name=channel_name,
+                slack_user_id=slack_user_id,
+                oldest=oldest,
+            )
             await db.commit()
+            return count, None
+        except Exception as e:
+            await db.rollback()
+            return 0, str(e)
         finally:
             await ingester.close()
 
-    return {"messages": total, "channels": channels_synced, "normalized": normalized, "errors": errors}
+
+async def _normalize_slack(team_id: str) -> int:
+    async with AsyncSessionLocal() as db:
+        count = await normalize_slack_messages(db, team_id=team_id)
+        await db.commit()
+        return count
 
 
-async def _run_github_sync(slack_user_id: str, slack_team_id: str, days_back: int) -> dict:
-    """Sync GitHub activity for a single user via their OAuth token."""
+# ── GitHub helpers (one asyncio.run() per step) ───────────────────────────────
+
+async def _get_github_credentials(slack_user_id: str, slack_team_id: str) -> tuple[str, str]:
+    """Returns (access_token, github_login), or raises."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(UserGitHubLink).where(
@@ -131,28 +133,62 @@ async def _run_github_sync(slack_user_id: str, slack_team_id: str, days_back: in
                 "No GitHub OAuth token found for this user. "
                 "They need to connect their GitHub account on the Connect Accounts page."
             )
+        return link.github_access_token, link.github_login
 
-        ingester = GitHubIngester(
-            access_token=link.github_access_token,
-            github_login=link.github_login,
+
+async def _get_github_link_info(slack_user_id: str, slack_team_id: str) -> tuple[bool, str]:
+    """Returns (has_token, github_login) for display purposes."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(UserGitHubLink).where(
+                UserGitHubLink.slack_user_id == slack_user_id,
+                UserGitHubLink.slack_team_id == slack_team_id,
+            )
         )
-        since = datetime.utcnow() - timedelta(days=days_back)
+        link = result.scalar_one_or_none()
+        if not link or not link.github_access_token:
+            return False, ""
+        return True, link.github_login or ""
+
+
+async def _get_github_repos(access_token: str, github_login: str) -> list[dict]:
+    ingester = GitHubIngester(access_token=access_token, github_login=github_login)
+    try:
+        return await ingester.get_repos()
+    finally:
+        await ingester.close()
+
+
+async def _sync_github_repo(
+    access_token: str,
+    github_login: str,
+    slack_team_id: str,
+    slack_user_id: str,
+    repo: dict,
+    since: datetime,
+) -> dict[str, int]:
+    """Sync one repo. Returns counts dict."""
+    async with AsyncSessionLocal() as db:
+        ingester = GitHubIngester(access_token=access_token, github_login=github_login)
         try:
-            counts = await ingester.ingest_user_activity(
+            counts = await ingester.ingest_single_repo(
                 db=db,
                 slack_team_id=slack_team_id,
                 slack_user_id=slack_user_id,
+                repo=repo,
                 since=since,
             )
             await db.commit()
-
-            # Normalize raw GitHubActivity → WorkUnits immediately
-            await normalize_github_activities(db, team_id=slack_team_id)
-            await db.commit()
+            return counts
         finally:
             await ingester.close()
 
-    return counts
+
+async def _normalize_github(team_id: str) -> int:
+    async with AsyncSessionLocal() as db:
+        count = await normalize_github_activities(db, team_id=team_id)
+        await db.commit()
+        return count
 
 
 # ── Page ──────────────────────────────────────────────────────────────────────
@@ -204,20 +240,62 @@ else:
 days_slack = st.slider("Days to backfill", min_value=1, max_value=90, value=7, key="slack_days")
 
 if st.button("Sync Slack", type="primary"):
-    with st.spinner(f"Syncing Slack messages for the last {days_slack} days…"):
+    oldest = datetime.utcnow() - timedelta(days=days_slack)
+    total_msgs = 0
+    errors: list[str] = []
+
+    # Step 1 — fetch token + channel list
+    with st.status("Connecting to Slack…", expanded=True) as status:
         try:
-            result = run(_run_slack_sync(slack_user_id, slack_team_id, days_slack))
-            st.success(
-                f"✅ Synced **{result['messages']}** new messages "
-                f"across **{result['channels']}** channels "
-                f"({result['normalized']} normalized into work units)."
-            )
-            if result["errors"]:
-                with st.expander(f"{len(result['errors'])} channel(s) had errors"):
-                    for err in result["errors"]:
-                        st.warning(err)
+            st.write("🔑 Fetching token…")
+            access_token = run(_get_slack_token(slack_user_id, slack_team_id))
+            st.write("📋 Loading joined channels…")
+            channels = run(_get_slack_channels(access_token, slack_team_id))
+            st.write(f"Found **{len(channels)}** channel(s) to sync.")
         except Exception as e:
-            st.error(f"Slack sync failed: {e}")
+            status.update(label="Failed to connect to Slack", state="error")
+            st.error(str(e))
+            st.stop()
+
+        # Step 2 — sync each channel
+        progress = st.progress(0, text="Starting…")
+        n = len(channels)
+
+        for i, ch in enumerate(channels):
+            ch_id   = ch["id"]
+            ch_name = ch.get("name", ch_id)
+            frac    = i / n
+            progress.progress(frac, text=f"Syncing #{ch_name}… ({i}/{n})")
+            st.write(f"📥 #{ch_name}")
+
+            count, err = run(
+                _sync_slack_channel(access_token, slack_team_id, slack_user_id, ch_id, ch_name, oldest)
+            )
+            if err:
+                errors.append(f"#{ch_name}: {err}")
+                st.write(f"  ⚠️ Error: {err}")
+            else:
+                total_msgs += count
+                if count:
+                    st.write(f"  ✓ {count} new message(s)")
+
+        # Step 3 — normalize
+        progress.progress(0.95, text="Normalizing work units…")
+        st.write("🔄 Normalizing raw messages into work units…")
+        normalized = run(_normalize_slack(slack_team_id))
+        st.write(f"  ✓ {normalized} work unit(s) created.")
+
+        progress.progress(1.0, text="Done")
+        label = (
+            f"✅ Slack sync complete — {total_msgs} new messages, {normalized} work units"
+            + (f" ({len(errors)} error(s))" if errors else "")
+        )
+        status.update(label=label, state="complete")
+
+    if errors:
+        with st.expander(f"{len(errors)} channel(s) had errors"):
+            for err in errors:
+                st.warning(err)
 
 st.markdown("---")
 
@@ -225,9 +303,9 @@ st.markdown("---")
 
 st.subheader("GitHub")
 
-github_link = run(_get_github_link(target_user_id, slack_team_id))
+has_token, gh_login = run(_get_github_link_info(target_user_id, slack_team_id))
 
-if not github_link or not github_link.github_access_token:
+if not has_token:
     if is_self:
         st.caption("You have not connected your GitHub account yet.")
         st.page_link("pages/1_Connect.py", label="Connect GitHub on the Connect Accounts page")
@@ -238,7 +316,6 @@ if not github_link or not github_link.github_access_token:
         )
     st.button("Sync GitHub", type="primary", disabled=True)
 else:
-    gh_login = github_link.github_login or "—"
     if is_self:
         st.caption(f"Pulls commits, PRs, reviews, and issues from your repositories (@{gh_login}).")
     else:
@@ -247,14 +324,56 @@ else:
     days_github = st.slider("Days to backfill", min_value=1, max_value=90, value=7, key="github_days")
 
     if st.button("Sync GitHub", type="primary"):
-        with st.spinner(f"Syncing GitHub activity for the last {days_github} days…"):
+        since = datetime.utcnow() - timedelta(days=days_github)
+        total_counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
+
+        with st.status("Connecting to GitHub…", expanded=True) as status:
             try:
-                counts = run(_run_github_sync(target_user_id, slack_team_id, days_github))
-                st.success(
-                    f"✅ GitHub sync complete for **{selected_name}**: {counts}"
-                )
+                st.write("🔑 Fetching credentials…")
+                gh_token, github_login = run(_get_github_credentials(target_user_id, slack_team_id))
+                st.write(f"📋 Loading repositories for @{github_login}…")
+                repos = run(_get_github_repos(gh_token, github_login))
+                st.write(f"Found **{len(repos)}** repository(ies) to scan.")
             except Exception as e:
-                st.error(f"GitHub sync failed: {e}")
+                status.update(label="Failed to connect to GitHub", state="error")
+                st.error(str(e))
+                st.stop()
+
+            # Step 2 — sync each repo
+            progress = st.progress(0, text="Starting…")
+            n = len(repos)
+
+            for i, repo in enumerate(repos):
+                repo_name = repo["full_name"]
+                frac = i / n if n else 1.0
+                progress.progress(frac, text=f"Scanning {repo_name}… ({i}/{n})")
+                st.write(f"📦 {repo_name}")
+
+                try:
+                    counts = run(
+                        _sync_github_repo(gh_token, github_login, slack_team_id, target_user_id, repo, since)
+                    )
+                    added = sum(counts.values())
+                    if added:
+                        parts = ", ".join(f"{v} {k}" for k, v in counts.items() if v)
+                        st.write(f"  ✓ {parts}")
+                    for k, v in counts.items():
+                        total_counts[k] = total_counts.get(k, 0) + v
+                except Exception as e:
+                    st.write(f"  ⚠️ {e}")
+
+            # Step 3 — normalize
+            progress.progress(0.95, text="Normalizing work units…")
+            st.write("🔄 Normalizing GitHub activity into work units…")
+            normalized = run(_normalize_github(slack_team_id))
+            st.write(f"  ✓ {normalized} work unit(s) created.")
+
+            progress.progress(1.0, text="Done")
+            summary = ", ".join(f"{v} {k}" for k, v in total_counts.items() if v) or "nothing new"
+            status.update(
+                label=f"✅ GitHub sync complete — {summary}, {normalized} work units",
+                state="complete",
+            )
 
 st.markdown("---")
 
