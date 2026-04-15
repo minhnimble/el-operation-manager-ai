@@ -29,6 +29,41 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def _copy_button(text: str, key: str) -> None:
+    """Render a small clipboard copy button for the given text.
+
+    Uses a self-contained HTML component so the JavaScript clipboard API works
+    without any Streamlit state round-trip.  The button label toggles to '✓'
+    for 1.5 s after a successful copy.
+    """
+    import json
+    import streamlit.components.v1 as components
+
+    js_text = json.dumps(text)          # safely escapes quotes, newlines, etc.
+    components.html(
+        f"""
+        <button
+            title="Copy to clipboard"
+            onclick="navigator.clipboard.writeText({js_text}).then(()=>{{
+                this.innerHTML='✓&nbsp;Copied';
+                this.style.borderColor='#22c55e';
+                this.style.color='#22c55e';
+                setTimeout(()=>{{
+                    this.innerHTML='📋&nbsp;Copy';
+                    this.style.borderColor='#d1d5db';
+                    this.style.color='#6b7280';
+                }}, 1500);
+            }})"
+            style="background:none;border:1px solid #d1d5db;border-radius:5px;
+                   padding:3px 10px;cursor:pointer;font-size:12px;color:#6b7280;
+                   font-family:inherit;line-height:1.4;white-space:nowrap;">
+            📋&nbsp;Copy
+        </button>
+        """,
+        height=34,
+    )
+
+
 def _format_standup_body(text: str) -> str:
     """Format standup message text for readable display.
 
@@ -421,13 +456,16 @@ with st.expander(f"Standups ({len(standups)})", expanded=len(standups) > 0):
     if not standups:
         st.info("No standup messages in this period.")
     else:
-        for item in standups:
+        for _i, item in enumerate(standups):
             ts      = item["timestamp"]
             raw     = item["body"] or item["title"] or "(empty)"
             body    = _format_standup_body(_format_slack_text(raw, _user_map))
             ch_name = item.get("channel_name") or item.get("slack_channel_id") or ""
             ch      = f"#{ch_name}" if ch_name else ""
-            st.markdown(f"**{ts}** {ch}")
+            _hdr_col, _btn_col = st.columns([8, 1])
+            _hdr_col.markdown(f"**{ts}** {ch}")
+            with _btn_col:
+                _copy_button(body, key=f"copy_standup_{_i}")
             st.markdown(body)
             st.divider()
 
@@ -469,6 +507,7 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
             _ch_key = _item.get("channel_name") or _item.get("slack_channel_id") or "unknown"
             _by_channel[_ch_key].append(_item)
 
+        _msg_idx = 0
         for _ch_name, _msgs in sorted(_by_channel.items()):
             st.markdown(f"**#{_ch_name}** &nbsp; <small>{len(_msgs)} message(s)</small>", unsafe_allow_html=True)
             for item in _msgs:
@@ -477,10 +516,13 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
                 raw  = item["body"] or item["title"] or "(empty)"
                 body = _format_slack_text(raw, _user_map)
 
-                col_icon, col_body, col_ts = st.columns([0.3, 5, 1.5])
+                col_icon, col_body, col_ts, col_copy = st.columns([0.3, 5, 1.5, 0.7])
                 col_icon.markdown(icon)
                 col_body.markdown(body)
                 col_ts.caption(ts)
+                with col_copy:
+                    _copy_button(body, key=f"copy_slack_{_msg_idx}")
+                _msg_idx += 1
             st.markdown("---")
 
 # ─── Share Summary ────────────────────────────────────────────────────────────
@@ -541,10 +583,45 @@ def _build_share_text(r: "WorkReport") -> str:
             f"  {r.standup_summary}",
         ]
 
-    if r.recent_standups:
+    # Standup summary: group by date, show only bullet answers (skip question headers)
+    _standup_items = [
+        a for a in (r.recent_activity or []) if a.get("type") == "standup"
+    ]
+    if _standup_items:
+        import re as _re
+        from collections import defaultdict as _dd
+
+        def _bullets_only(text: str) -> list[str]:
+            """Strip *question headers* and return only the bullet answer lines."""
+            # Normalise newlines
+            flat = _re.sub(r"\s*\n\s*", " ", text).strip()
+            # Remove *bold question sections* (everything inside *...*)
+            flat = _re.sub(r"\*[^*]+\*", "", flat)
+            # Split on bullet markers and clean up
+            parts = _re.split(r"\s*•\s*", flat)
+            return [p.strip() for p in parts if p.strip()]
+
+        # Group by calendar date (first 12 chars of "Apr 15, 2026 08:13" → "Apr 15, 2026")
+        _by_date: dict[str, list[str]] = _dd(list)
+        for _a in _standup_items:
+            _date_key = _a["timestamp"].split(" ")[0:3]  # e.g. ["Apr", "15,", "2026"]
+            _date_str = " ".join(_date_key)
+            for _b in _bullets_only(_a.get("body") or _a.get("title") or ""):
+                _by_date[_date_str].append(_b)
+
+        # Deduplicate bullets within each day (same message sometimes ingested twice)
         lines += ["", "── RECENT STANDUPS ──────────────────"]
-        for i, text in enumerate(r.recent_standups, 1):
-            lines.append(f"  {i}. {text[:300]}{'…' if len(text) > 300 else ''}")
+        for _date_str, _bullets in sorted(
+            _by_date.items(),
+            key=lambda kv: kv[0],
+            reverse=True,
+        ):
+            seen: set[str] = set()
+            unique = [b for b in _bullets if not (b in seen or seen.add(b))]  # type: ignore[func-returns-value]
+            lines.append(f"  {_date_str}")
+            for _b in unique:
+                _truncated = _b[:200] + ("…" if len(_b) > 200 else "")
+                lines.append(f"    • {_truncated}")
 
     lines += ["", "─" * 38]
     return "\n".join(lines)
