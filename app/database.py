@@ -23,27 +23,40 @@ engine = create_async_engine(
 # connection and cause DuplicatePreparedStatementError when PgBouncer
 # hands the same connection to another client that tries the same name.
 #
-# Two things must be zeroed out — they live at different layers:
+# AsyncAdapt_asyncpg_connection uses __slots__, so we cannot add new
+# attributes — we can only overwrite the ones that already exist as slots.
+# Two slots control prepared-statement behaviour:
 #
-#   asyncpg  (connect_args statement_cache_size=0, above)
-#     → stops asyncpg from caching PreparedStatement handles client-side.
+#   _prepared_statement_name_func  → lambda: None
+#       SQLAlchemy calls this to get the name for each server-side prepared
+#       statement.  Returning None makes asyncpg use an *unnamed* prepared
+#       statement (""), which PostgreSQL silently overwrites on each use
+#       instead of raising a duplicate-name error.
 #
-#   SQLAlchemy asyncpg adapter  (_prepared_statement_cache_size / name func)
-#     → SQLAlchemy generates its own named statements independently.
-#       Setting _prepared_statement_cache_size=0 makes its adapter call
-#       asyncpg.prepare(name=None), which PostgreSQL treats as an *unnamed*
-#       prepared statement.  Unnamed statements are silently overwritten on
-#       each use instead of raising a duplicate-name error.
-#
-# create_async_engine() does not accept prepared_statement_cache_size as a
-# kwarg in all 2.0.x builds, so we patch each connection via an event.
+#   _prepared_statement_cache  → _NeverCache() (no-op dict)
+#       SQLAlchemy caches PreparedStatement objects by SQL text.  With unnamed
+#       statements a cached handle from a previous connection is invalid on the
+#       next (PgBouncer may have routed us to a different server connection
+#       with no prepared statement at all).  Replacing the cache with a dict
+#       that never stores anything forces a fresh prepare() on every query,
+#       which is safe and avoids stale-handle errors.
+
+
+class _NeverCache(dict):
+    """Drop-in dict replacement that never stores entries.
+
+    Every lookup misses, so SQLAlchemy always calls asyncpg.prepare() fresh
+    rather than reusing a cached PreparedStatement that may no longer exist
+    on the current server connection.
+    """
+    def __setitem__(self, key, value):
+        pass  # intentionally discard — never cache
+
+
 @event.listens_for(engine.sync_engine, "connect")
 def _patch_asyncpg_for_pgbouncer(dbapi_connection, _connection_record):
-    # Zero the SQLAlchemy-layer cache size so the name function is consulted
-    # on every statement execution (no SQLAlchemy-level reuse).
-    dbapi_connection._prepared_statement_cache_size = 0
-    # Return None → asyncpg calls prepare(name=None) → unnamed statement.
     dbapi_connection._prepared_statement_name_func = lambda: None
+    dbapi_connection._prepared_statement_cache = _NeverCache()
 
 
 AsyncSessionLocal = async_sessionmaker(
