@@ -112,6 +112,9 @@ async def build_work_report(
             "url": wu.url or "",
             "github_repo": wu.github_repo or "",
             "slack_channel_id": wu.slack_channel_id or "",
+            "channel_name": (
+                (wu.extra_data or {}).get("channel_name") or wu.slack_channel_id or ""
+            ),
             "timestamp": wu.timestamp.strftime("%b %d, %Y %H:%M"),
         }
         for wu in activity_units

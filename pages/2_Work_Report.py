@@ -32,13 +32,17 @@ def run(coro):
 def _format_standup_body(text: str) -> str:
     """Format standup message text for readable display.
 
-    Slack standup bot messages are often stored as a single run-on string with
-    no newlines, or with bare \\n that markdown collapses into spaces.  This
-    function:
-      1. Splits on existing newlines and re-joins with paragraph spacing.
-      2. When the text has no newlines, detects question boundaries (text
-         ending with '?') and inserts paragraph breaks before each new section.
-      3. Converts inline bullet sequences '• item • item' to one bullet per line.
+    Standup bot messages arrive as a single run-on string (no newlines), or
+    with bare \\n that markdown collapses to spaces.  We normalise to a flat
+    string first, then re-apply structure in four passes:
+
+      1. Paragraph break (\\n\\n) after each '?' → separates questions.
+      2. Paragraph break before common standup question-starter words that
+         follow non-'?' text (e.g. "...SHAs What do you…").
+      3. Soft line break (markdown '  \\n') before inline Slack emoji codes
+         (:word:) so they sit on their own line above the bullets.
+      4. Soft line break before each '•' bullet → one bullet per line,
+         visually grouped with the preceding header without blank gaps.
     """
     import re
 
@@ -46,29 +50,30 @@ def _format_standup_body(text: str) -> str:
     if not text:
         return text
 
-    if "\n" in text:
-        # Already has line structure — just ensure paragraph spacing for markdown
-        lines = [ln.strip() for ln in text.splitlines()]
-        # Convert inline bullets within a single line
-        expanded: list[str] = []
-        for ln in lines:
-            if ln:
-                ln = re.sub(r"\s*•\s+", "\n• ", ln).strip()
-            expanded.append(ln)
-        # Collapse blanks then join with double newline for paragraph breaks
-        result: list[str] = []
-        for ln in expanded:
-            if ln == "" and result and result[-1] == "":
-                continue  # deduplicate blank lines
-            result.append(ln)
-        return "\n\n".join(ln if ln else "" for ln in result)
-    else:
-        # No newlines — detect question boundaries and split there
-        # Insert paragraph break after each '?' that is followed by more text
-        formatted = re.sub(r"\?(\s+)(\S)", lambda m: "?\n\n" + m.group(2), text)
-        # Convert inline bullets to one per line
-        formatted = re.sub(r"\s*•\s+", "\n• ", formatted)
-        return formatted.strip()
+    # Normalise: collapse all existing newlines/whitespace to a single space so
+    # both stored formats (with/without \\n) go through the same path.
+    text = re.sub(r"\s*\n\s*", " ", text).strip()
+
+    # Pass 1: paragraph break after '?' followed by more content
+    text = re.sub(r"\?(\s+)(\S)", lambda m: "?\n\n" + m.group(2), text)
+
+    # Pass 2: paragraph break before common question starters mid-text
+    _Q_STARTERS = (
+        "What ", "Any ", "How ", "Did ", "Do ", "Have ",
+        "Is ", "Are ", "Were ", "Can ", "Please ",
+    )
+    q_pattern = r"(\S)\s+(" + "|".join(re.escape(q) for q in _Q_STARTERS) + ")"
+    text = re.sub(q_pattern, lambda m: m.group(1) + "\n\n" + m.group(2), text)
+
+    # Pass 3: soft line break before Slack emoji codes (:word:) that sit
+    # between a question and its bullet answers (e.g. "?\n\n:singha: •").
+    text = re.sub(r"(\S) +(:[a-z_]+:)", r"\1  \n\2", text)
+
+    # Pass 4: soft line break before each bullet so they stay visually grouped
+    # with the preceding emoji/header without an extra blank paragraph.
+    text = re.sub(r" *• +", "  \n• ", text)
+
+    return text.strip()
 
 
 async def _get_team_options(
@@ -306,17 +311,51 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
     if not other_slack:
         st.info("No discussion messages in this period.")
     else:
-        for item in other_slack:
-            icon  = _SLACK_ICONS.get(item["type"], "💬")
-            label = item["type"].replace("_", " ").title()
-            ts    = item["timestamp"]
-            body  = item["body"] or item["title"] or "(empty)"
-            ch    = f"#{item['slack_channel_id']}" if item["slack_channel_id"] else ""
+        # ── CSV export ────────────────────────────────────────────────────────
+        import csv, io
+        _csv_buf = io.StringIO()
+        _writer  = csv.DictWriter(
+            _csv_buf,
+            fieldnames=["timestamp", "channel", "type", "body", "url"],
+            extrasaction="ignore",
+        )
+        _writer.writeheader()
+        for _item in other_slack:
+            _writer.writerow({
+                "timestamp": _item["timestamp"],
+                "channel":   _item.get("channel_name") or _item.get("slack_channel_id") or "",
+                "type":      _item["type"],
+                "body":      _item["body"] or _item["title"] or "",
+                "url":       _item.get("url") or "",
+            })
+        st.download_button(
+            label="⬇️ Export to CSV",
+            data=_csv_buf.getvalue().encode("utf-8"),
+            file_name=f"slack_messages_{selected_name.replace(' ', '_')}.csv",
+            mime="text/csv",
+            key="export_slack_csv",
+        )
 
-            col_icon, col_body, col_ts = st.columns([0.3, 5, 1.5])
-            col_icon.markdown(icon)
-            col_body.markdown(f"{body} &nbsp; {ch}")
-            col_ts.caption(ts)
+        st.markdown("---")
+
+        # ── Group by channel ──────────────────────────────────────────────────
+        from collections import defaultdict
+        _by_channel: dict[str, list[dict]] = defaultdict(list)
+        for _item in other_slack:
+            _ch_key = _item.get("channel_name") or _item.get("slack_channel_id") or "unknown"
+            _by_channel[_ch_key].append(_item)
+
+        for _ch_name, _msgs in sorted(_by_channel.items()):
+            with st.expander(f"#{_ch_name} ({len(_msgs)})", expanded=False):
+                for item in _msgs:
+                    icon = _SLACK_ICONS.get(item["type"], "💬")
+                    ts   = item["timestamp"]
+                    body = item["body"] or item["title"] or "(empty)"
+
+                    col_icon, col_body, col_ts = st.columns([0.3, 5, 1.5])
+                    col_icon.markdown(icon)
+                    col_body.markdown(body)
+                    col_ts.caption(ts)
 
 # ─── Share Summary ────────────────────────────────────────────────────────────
 
