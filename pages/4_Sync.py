@@ -394,7 +394,20 @@ with _slack_col2:
         key="slack_days_input", label_visibility="visible",
     )
 
-if st.button("Sync Slack", type="primary"):
+_slack_btn_col1, _slack_btn_col2 = st.columns(2)
+with _slack_btn_col1:
+    sync_normal_clicked = st.button(
+        "Sync Slack Messages", type="primary", key="sync_slack_normal",
+        help="Sync all channels except daily-standup.",
+    )
+with _slack_btn_col2:
+    sync_standup_clicked = st.button(
+        "Sync Daily Standup", type="secondary", key="sync_slack_standup",
+        help="Sync only the daily-standup channel.",
+    )
+
+if sync_normal_clicked or sync_standup_clicked:
+    slack_sync_mode = "normal" if sync_normal_clicked else "standup"
     oldest = datetime.utcnow() - timedelta(days=days_slack)
     total_msgs = 0
     errors: list[str] = []
@@ -445,6 +458,23 @@ if st.button("Sync Slack", type="primary"):
                     _filter_channels_by_member(access_token, slack_team_id, channels, target_user_id)
                 )
                 st.write(f"  → **{selected_name}** is in **{len(channels)}** — syncing those.")
+
+            # ── Apply mode filter ──────────────────────────────────────────────
+            # "normal"  → all channels except always-include standup ones
+            # "standup" → only always-include standup channels
+            if slack_sync_mode == "normal":
+                channels = [
+                    ch for ch in channels
+                    if ch.get("name", "").lower() not in _ALWAYS_INCLUDE_CHANNELS
+                ]
+                st.write(f"  → Mode: **normal messages** — syncing **{len(channels)}** channel(s) (standup excluded).")
+            else:
+                channels = [
+                    ch for ch in channels
+                    if ch.get("name", "").lower() in _ALWAYS_INCLUDE_CHANNELS
+                ]
+                st.write(f"  → Mode: **daily standup** — syncing **{len(channels)}** standup channel(s).")
+
         except Exception as e:
             slack_progress.empty()
             slack_status_text.empty()
@@ -485,7 +515,7 @@ if st.button("Sync Slack", type="primary"):
                             unresolved_standup_names.append(name)
                     st.write(
                         f"  ⚠️ Standup bot name(s) not matched to any team member: "
-                        + ", ".join(f"**{n}**" for n in unresolved)
+                        + ", ".join(f"**{u}**" for u in unresolved)
                     )
 
         # Step 3 — normalize
@@ -497,8 +527,9 @@ if st.button("Sync Slack", type="primary"):
 
         slack_progress.progress(100, text="Done ✓")
         slack_status_text.empty()
+        mode_label = "normal messages" if slack_sync_mode == "normal" else "daily standup"
         label = (
-            f"✅ Slack sync complete — {total_msgs} new messages, {normalized} work units"
+            f"✅ Slack sync complete ({mode_label}) — {total_msgs} new messages, {normalized} work units"
             + (f" · {len(errors)} error(s)" if errors else "")
         )
         status.update(label=label, state="complete")
