@@ -40,9 +40,10 @@ _IGNORED_CHANNEL_EXACT = {
     "vn-community",
     "cat-place",
     "hardware-and-machinery",
+    "badminton",
 }
 _IGNORED_CHANNEL_SUFFIXES = ("-activity", "-corner")
-_IGNORED_CHANNEL_PREFIXES = ("ic-", "nimble-")
+_IGNORED_CHANNEL_PREFIXES = ("ic-", "nimble")
 
 
 def _should_skip_channel(name: str) -> bool:
