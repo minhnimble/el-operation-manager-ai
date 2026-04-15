@@ -45,4 +45,4 @@ class UserGitHubLink(Base):
     github_token_scope: Mapped[str | None] = mapped_column(String(512))
     linked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    user: Mapped["User"] = relationship(back_populates="github_link")
+    user: Mapped[User] = relationship(back_populates="github_link")

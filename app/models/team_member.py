@@ -12,6 +12,10 @@ class TeamMember(Base):
     The *member* is any workspace user the EM chose to add to their team.
     Members do NOT need to sign in — their messages are captured automatically
     when the EM syncs, because SlackIngester stores all message authors.
+
+    github_login is set manually by the EM when adding a member.  It is used
+    to link Slack activity to GitHub activity in reports for members who have
+    not connected their own GitHub account via OAuth.
     """
 
     __tablename__ = "team_members"
@@ -30,9 +34,16 @@ class TeamMember(Base):
     member_slack_team_id: Mapped[str] = mapped_column(String(64))
     member_display_name: Mapped[str | None] = mapped_column(String(256))
     member_real_name: Mapped[str | None] = mapped_column(String(256))
+    member_email: Mapped[str | None] = mapped_column(String(256))
     member_avatar_url: Mapped[str | None] = mapped_column(String(512))
 
+    # GitHub handle — set by the EM, used when the member hasn't connected GitHub via OAuth
+    github_login: Mapped[str | None] = mapped_column(String(256))
+
     added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
     def display(self) -> str:
         return (

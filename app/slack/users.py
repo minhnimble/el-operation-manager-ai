@@ -50,6 +50,7 @@ async def list_workspace_users(ingester: SlackIngester) -> list[dict]:
                 "slack_user_id": member["id"],
                 "display_name": display_name or member.get("name", member["id"]),
                 "real_name": profile.get("real_name", ""),
+                "email": profile.get("email", ""),
                 "avatar_url": profile.get("image_48", ""),
             })
 

@@ -41,17 +41,21 @@ async def build_work_report(
     )
     user = user_result.scalar_one_or_none()
 
+    # Look up TeamMember record (may exist regardless of whether user signed in)
+    member_result = await db.execute(
+        select(TeamMember).where(
+            TeamMember.member_slack_user_id == slack_user_id,
+            TeamMember.member_slack_team_id == slack_team_id,
+        ).limit(1)
+    )
+    team_member = member_result.scalar_one_or_none()
+
     if user:
         display_name = user.slack_display_name or user.slack_real_name or slack_user_id
+    elif team_member:
+        display_name = team_member.display()
     else:
-        member_result = await db.execute(
-            select(TeamMember).where(
-                TeamMember.member_slack_user_id == slack_user_id,
-                TeamMember.member_slack_team_id == slack_team_id,
-            ).limit(1)
-        )
-        member = member_result.scalar_one_or_none()
-        display_name = member.display() if member else slack_user_id
+        display_name = slack_user_id
 
     date_range = f"{start_date.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}"
 

@@ -12,7 +12,8 @@ Built for Engineering Managers, Tech Leads, and CTOs who want to reduce manual s
 - Pulls standup messages and channel activity from channels you're a member of
 - Pulls commits, PRs, reviews, and issues from GitHub
 - Normalizes everything into a unified `WorkUnit` model
-- Generates structured work reports via a Streamlit UI
+- **Team management** — EM adds team members from the workspace; their activity is captured automatically without requiring them to sign in
+- Generates structured work reports for any tracked team member via a Streamlit UI
 - Uses Claude AI to classify work items and produce leadership insights
 
 ---
@@ -276,17 +277,23 @@ Open the app at `http://localhost:8501` (or your Streamlit Cloud URL).
 
 Go to **🔗 Connect Accounts** and click **Sign in with Slack**. After authorizing, click **Connect GitHub**. Both flows redirect back to the app automatically.
 
-### 2. Sync Data
+### 2. Build Your Team
+
+Go to **👥 Team Overview** and click **Load workspace users**. Select your direct reports from the list and click **Add selected members**.
+
+> **Team members do not need to sign in.** Their Slack messages are captured automatically when you sync, because the ingester stores all message authors in every channel you're a member of. GitHub metrics will show zeros until each team member connects their own GitHub account.
+
+### 3. Sync Data
 
 Go to **🔄 Sync Data**, set how many days to backfill, and click **Sync Slack** and **Sync GitHub**. Jobs run in the background via Celery — check back in a minute or two.
 
-### 3. Generate a Work Report
+### 4. Generate a Work Report
 
-Go to **📊 Work Report**, select a team member, choose a date range, and click **Generate Report**. Toggle **AI insights** on to get Claude-powered work classification and leadership summary.
+Go to **📊 Work Report**, select any team member from the dropdown (includes you and everyone added to your team), choose a date range, and click **Generate Report**. Toggle **AI insights** on to get Claude-powered work classification and leadership summary.
 
-### 4. View Team
+### 5. Manage Your Team
 
-Go to **👥 Team Overview** to see all connected users and their Slack/GitHub link status.
+Go to **👥 Team Overview** to see all tracked members, their GitHub connection status, and remove anyone who has left the team.
 
 ---
 
@@ -313,15 +320,16 @@ streamlit_app.py               # Main UI + OAuth callback handler
 pages/
 ├── 1_Connect.py               # Sign in with Slack + GitHub linking
 ├── 2_Work_Report.py           # Work report UI with charts
-├── 3_Team_Overview.py         # Team connection status
+├── 3_Team_Overview.py         # Team management — add/remove members
 └── 4_Sync.py                  # Manual Slack + GitHub sync triggers
 app/
 ├── main.py                    # Optional FastAPI app (REST API)
 ├── config.py                  # Settings (pydantic-settings + .env)
-├── database.py                # SQLAlchemy async engine + session
+├── database.py                # SQLAlchemy async engine + session (NullPool)
 ├── models/
 │   ├── user.py                # User + UserGitHubLink
 │   ├── slack_token.py         # SlackUserToken (per-user OAuth tokens)
+│   ├── team_member.py         # TeamMember — EM's tracked team roster
 │   ├── work_unit.py           # WorkUnit — core normalized abstraction
 │   └── raw_data.py            # SlackMessage, GitHubActivity (raw store)
 ├── ingestion/                 # Layer 1 — raw data collection
@@ -336,7 +344,8 @@ app/
 │   ├── work_extractor.py      # Standup text → structured work items
 │   └── insight_generator.py   # WorkReport → leadership insights
 ├── slack/
-│   └── oauth.py               # Sign in with Slack OAuth flow
+│   ├── oauth.py               # Sign in with Slack OAuth flow
+│   └── users.py               # Workspace user listing (users.list API)
 ├── github/
 │   └── oauth.py               # GitHub OAuth exchange + user linking
 ├── api/
@@ -365,8 +374,8 @@ ENABLE_ORG_ANALYTICS=false     # Phase 5 — not yet implemented
 
 This tool is designed for team transparency, not surveillance:
 
-- Only public channels the user has joined are tracked
-- Each user connects their own account — no admin can pull data without user authorization
-- Private DMs are never captured
-- GitHub access requires explicit user OAuth consent
-- Data is scoped to your workspace only
+- Only public channels the EM has joined are tracked — private channels and DMs are never captured
+- The EM adds team members explicitly; no data is collected for anyone not on the roster
+- GitHub access requires explicit OAuth consent from each individual user
+- All data is scoped to your workspace and stored in your own database
+- Team members can ask to be removed from the roster at any time
