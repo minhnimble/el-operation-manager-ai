@@ -434,7 +434,7 @@ class SlackIngester:
                                 db, reply, channel_id, channel_name,
                                 is_standup=is_standup, is_reply=True,
                             ):
-                            saved += 1
+                                saved += 1
 
         await db.flush()
         logger.info("Backfilled %d messages from #%s", saved, channel_name)
