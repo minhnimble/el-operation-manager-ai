@@ -61,7 +61,7 @@ async def normalize_slack_messages(
     # slack_message_ts already exists in the DB.
     seen_ts: set[str] = set()
 
-    async with db.no_autoflush:
+    with db.no_autoflush:
         for msg in messages:
             ts = msg.message_ts
 
@@ -136,7 +136,7 @@ async def normalize_github_activities(
     created = 0
     seen_refs: set[tuple[str, str, str]] = set()
 
-    async with db.no_autoflush:
+    with db.no_autoflush:
         for act in activities:
             wu_type = _GITHUB_TYPE_MAP.get(act.activity_type, WorkUnitType.COMMIT)
             ref_key = (act.ref_id or "", act.repo_full_name or "", wu_type.value)
