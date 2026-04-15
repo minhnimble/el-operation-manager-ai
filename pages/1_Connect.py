@@ -31,8 +31,15 @@ def run(coro):
 
 
 def _oauth_button(label: str, url: str, primary: bool = True) -> None:
-    """Open the OAuth URL in a new tab and close the current tab."""
+    """Open the OAuth URL in a new tab and close the current tab.
+
+    Must use components.html — st.markdown passes through DOMPurify which
+    strips onclick handlers, so clicks do nothing.  components.html renders
+    inside a sandboxed iframe that allows scripts and popups, so onclick fires
+    normally and window.open() works.
+    """
     import html as _html
+    import streamlit.components.v1 as components
 
     safe_href = _html.escape(url, quote=True)
     safe_label = _html.escape(label)
@@ -41,24 +48,27 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
     fg     = "#ffffff" if primary else "#31333f"
     border = "#ff4b4b" if primary else "#d0d0d0"
 
-    st.markdown(
-        f"""<a href="#"
-            onclick="window.open('{safe_href}', '_blank'); window.close(); return false;"
-            style="
-                display:inline-block;
-                background:{bg};
-                color:{fg};
-                border:1px solid {border};
-                border-radius:6px;
-                padding:8px 20px;
-                font-size:14px;
-                font-weight:500;
-                font-family:sans-serif;
-                line-height:1.5;
-                text-decoration:none;
-                cursor:pointer;
-                margin:4px 0 8px 0;">{safe_label}</a>""",
-        unsafe_allow_html=True,
+    components.html(
+        f"""
+        <a href="#"
+           onclick="window.open('{safe_href}', '_blank'); window.top.close(); return false;"
+           style="
+               display:inline-block;
+               background:{bg};
+               color:{fg};
+               border:1px solid {border};
+               border-radius:6px;
+               padding:8px 20px;
+               font-size:14px;
+               font-weight:500;
+               font-family:sans-serif;
+               line-height:1.5;
+               text-decoration:none;
+               cursor:pointer;">
+          {safe_label}
+        </a>
+        """,
+        height=48,
     )
 
 
