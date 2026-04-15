@@ -417,10 +417,38 @@ class SlackIngester:
                             unresolved_bot_names.append(bot_username)
                 if msg.get("reply_count", 0) > 0:
                     async for reply in self.iter_thread_replies(channel_id, ts, oldest_ts):
-                        if reply.get("subtype", "") in {"channel_join", "channel_leave"}:
+                        rsubtype = reply.get("subtype", "")
+                        if rsubtype in {"channel_join", "channel_leave"}:
                             continue
-                        if self._is_relevant(reply, filter_user_id):
-                            # Attribute to filter_user_id if relevant only due to mention
+
+                        if rsubtype == "bot_message":
+                            # Bot-posted standup reply (e.g. Nimble Bot posts each
+                            # member's answer in-thread with username = their name).
+                            r_bot_username = (
+                                reply.get("username")
+                                or reply.get("user_profile", {}).get("display_name", "")
+                            ).strip()
+                            if r_bot_username:
+                                r_resolved = await self._resolve_user_by_name(db, r_bot_username)
+                                logger.info(
+                                    "Standup thread reply in #%s: username=%r → resolved=%s",
+                                    channel_name, r_bot_username, r_resolved,
+                                )
+                                r_matches = (
+                                    r_resolved is not None
+                                    and (filter_user_id is None or r_resolved == filter_user_id)
+                                )
+                                if r_matches:
+                                    if await self._save_message(
+                                        db, reply, channel_id, channel_name,
+                                        is_standup=True, is_reply=True,
+                                        user_id=r_resolved,
+                                    ):
+                                        saved += 1
+                                elif r_resolved is None and r_bot_username not in unresolved_bot_names:
+                                    unresolved_bot_names.append(r_bot_username)
+                        elif self._is_relevant(reply, filter_user_id):
+                            # Regular user reply in thread — capture if relevant
                             reply_sender = reply.get("user", "")
                             reply_override = (
                                 filter_user_id

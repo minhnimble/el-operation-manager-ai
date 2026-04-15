@@ -385,7 +385,14 @@ else:
         f"including **{selected_name}**. No separate token needed."
     )
 
-days_slack = st.slider("Days to backfill", min_value=1, max_value=90, value=7, key="slack_days")
+_slack_col1, _slack_col2 = st.columns([3, 1])
+with _slack_col1:
+    days_slack = st.slider("Days to backfill", min_value=1, max_value=365, value=7, key="slack_days")
+with _slack_col2:
+    days_slack = st.number_input(
+        "Or enter days", min_value=1, max_value=3650, value=days_slack,
+        key="slack_days_input", label_visibility="visible",
+    )
 
 if st.button("Sync Slack", type="primary"):
     oldest = datetime.utcnow() - timedelta(days=days_slack)
@@ -601,7 +608,14 @@ else:
     else:
         st.caption(f"Syncing GitHub for **{selected_name}** (@{gh_login}).")
 
-    days_github = st.slider("Days to backfill", min_value=1, max_value=90, value=7, key="github_days")
+    _gh_col1, _gh_col2 = st.columns([3, 1])
+    with _gh_col1:
+        days_github = st.slider("Days to backfill", min_value=1, max_value=365, value=7, key="github_days")
+    with _gh_col2:
+        days_github = st.number_input(
+            "Or enter days", min_value=1, max_value=3650, value=days_github,
+            key="github_days_input", label_visibility="visible",
+        )
 
     if st.button("Sync GitHub", type="primary"):
         since = datetime.utcnow() - timedelta(days=days_github)
