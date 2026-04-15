@@ -477,37 +477,40 @@ with st.expander("🗑️ Clean up stale channel data", expanded=False):
         "a member of. Run this after adjusting the ignore list or team membership."
     )
 
-    _ck_preview  = f"_cleanup_preview_{target_user_id}"
-    _ck_valid    = f"_cleanup_valid_{target_user_id}"
-    _ck_confirm  = f"_cleanup_confirm_{target_user_id}"
+    _ck_preview = f"_cleanup_preview_{target_user_id}"
+    _ck_valid   = f"_cleanup_valid_{target_user_id}"
+    _ck_confirm = f"_cleanup_confirm_{target_user_id}"
 
-    col_preview, col_confirm, col_cancel = st.columns([2, 2, 1])
+    # ── Step 1: Preview button ─────────────────────────────────────────────────
+    if st.button("Preview stale data", key=f"preview_cleanup_{target_user_id}"):
+        # Clear any prior confirm state when re-previewing
+        st.session_state.pop(_ck_confirm, None)
+        try:
+            access_token_cleanup = run(_get_slack_token(slack_user_id, slack_team_id))
+            with st.spinner("Checking which channels are valid for this user…"):
+                valid_ids, valid_names = run(
+                    _get_valid_channel_ids(access_token_cleanup, slack_team_id, target_user_id)
+                )
+                msg_c, wu_c = run(
+                    _count_stale_slack_data(target_user_id, slack_team_id, valid_ids)
+                )
+            st.session_state[_ck_valid]   = valid_ids
+            st.session_state[_ck_preview] = (msg_c, wu_c, valid_names)
+        except Exception as e:
+            st.error(f"Could not load channels: {e}")
 
-    with col_preview:
-        if st.button("Preview stale data", key=f"preview_cleanup_{target_user_id}"):
-            with st.spinner("Checking channels…"):
-                try:
-                    access_token_cleanup = run(_get_slack_token(slack_user_id, slack_team_id))
-                    valid_ids, valid_names = run(
-                        _get_valid_channel_ids(access_token_cleanup, slack_team_id, target_user_id)
-                    )
-                    msg_c, wu_c = run(
-                        _count_stale_slack_data(target_user_id, slack_team_id, valid_ids)
-                    )
-                    st.session_state[_ck_valid]   = valid_ids
-                    st.session_state[_ck_preview] = (msg_c, wu_c, valid_names)
-                    st.session_state[_ck_confirm] = False
-                except Exception as e:
-                    st.error(f"Could not load channels: {e}")
-
+    # ── Step 2: Show preview results ───────────────────────────────────────────
     if _ck_preview in st.session_state:
         msg_c, wu_c, valid_names = st.session_state[_ck_preview]
         valid_ids = st.session_state.get(_ck_valid, [])
+
+        ch_list = ", ".join(f"#{n}" for n in valid_names[:10])
+        overflow = f" … and {len(valid_names) - 10} more" if len(valid_names) > 10 else ""
         st.info(
             f"**{selected_name}** is a member of **{len(valid_names)}** synced channel(s): "
-            f"{', '.join(f'#{n}' for n in valid_names[:10])}"
-            + (f" … and {len(valid_names) - 10} more" if len(valid_names) > 10 else "")
+            f"{ch_list}{overflow}"
         )
+
         if msg_c == 0 and wu_c == 0:
             st.success("✅ No stale data found — everything looks clean.")
         else:
@@ -515,29 +518,31 @@ with st.expander("🗑️ Clean up stale channel data", expanded=False):
                 f"Found **{msg_c}** SlackMessage(s) and **{wu_c}** WorkUnit(s) "
                 "outside those channels."
             )
-            with col_confirm:
+
+            # ── Step 3: Confirm delete button ─────────────────────────────────
+            if not st.session_state.get(_ck_confirm):
                 if st.button(
-                    f"Delete {msg_c} messages + {wu_c} work units",
+                    f"⚠️ Delete {msg_c} messages + {wu_c} work units",
                     type="primary",
                     key=f"confirm_cleanup_{target_user_id}",
                 ):
                     st.session_state[_ck_confirm] = True
-
-            if st.session_state.get(_ck_confirm):
-                with st.spinner("Deleting stale data…"):
-                    try:
-                        del_msgs, del_wus = run(
-                            _delete_stale_slack_data(target_user_id, slack_team_id, valid_ids)
-                        )
-                        st.success(
-                            f"🗑️ Deleted **{del_msgs}** SlackMessage(s) and "
-                            f"**{del_wus}** WorkUnit(s) from stale channels."
-                        )
-                        # Clear state so preview refreshes on next run
-                        for k in (_ck_preview, _ck_valid, _ck_confirm):
-                            st.session_state.pop(k, None)
-                    except Exception as e:
-                        st.error(f"Deletion failed: {e}")
+                    st.rerun()
+            else:
+                # Execute the deletion
+                try:
+                    del_msgs, del_wus = run(
+                        _delete_stale_slack_data(target_user_id, slack_team_id, valid_ids)
+                    )
+                    st.success(
+                        f"🗑️ Deleted **{del_msgs}** SlackMessage(s) and "
+                        f"**{del_wus}** WorkUnit(s) from stale channels."
+                    )
+                except Exception as e:
+                    st.error(f"Deletion failed: {e}")
+                finally:
+                    for k in (_ck_preview, _ck_valid, _ck_confirm):
+                        st.session_state.pop(k, None)
 
 st.markdown("---")
 
