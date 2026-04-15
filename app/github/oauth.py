@@ -7,7 +7,7 @@ when called from Streamlit's async/sync mixed context.
 
 import logging
 
-import httpx
+import requests
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -19,33 +19,33 @@ settings = get_settings()
 
 
 def exchange_code_for_token(code: str) -> dict:
-    """Exchange OAuth code for GitHub access token — synchronous HTTP call."""
-    with httpx.Client(timeout=15.0) as client:
-        resp = client.post(
-            "https://github.com/login/oauth/access_token",
-            json={
-                "client_id": settings.github_client_id,
-                "client_secret": settings.github_client_secret,
-                "code": code,
-            },
-            headers={"Accept": "application/json"},
-        )
-        resp.raise_for_status()
-        return resp.json()
+    """Exchange OAuth code for GitHub access token."""
+    resp = requests.post(
+        "https://github.com/login/oauth/access_token",
+        json={
+            "client_id": settings.github_client_id,
+            "client_secret": settings.github_client_secret,
+            "code": code,
+        },
+        headers={"Accept": "application/json"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def get_github_user(access_token: str) -> dict:
-    """Fetch authenticated GitHub user profile — synchronous HTTP call."""
-    with httpx.Client(
+    """Fetch authenticated GitHub user profile."""
+    resp = requests.get(
+        "https://api.github.com/user",
         headers={
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/vnd.github+json",
         },
-        timeout=10.0,
-    ) as client:
-        resp = client.get("https://api.github.com/user")
-        resp.raise_for_status()
-        return resp.json()
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def link_github_to_user(

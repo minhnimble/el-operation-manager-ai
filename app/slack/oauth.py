@@ -7,7 +7,7 @@ when called from Streamlit's async/sync mixed context.
 
 import logging
 
-import httpx
+import requests
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -42,36 +42,37 @@ def build_auth_url(state: str) -> str:
 
 
 def exchange_code(code: str) -> dict:
-    """Exchange OAuth code for user token — synchronous HTTP call."""
-    with httpx.Client(timeout=15.0) as client:
-        resp = client.post(
-            SLACK_TOKEN_URL,
-            data={
-                "client_id": settings.slack_client_id,
-                "client_secret": settings.slack_client_secret,
-                "code": code,
-                "redirect_uri": settings.app_base_url,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get("ok"):
-            raise ValueError(f"Slack OAuth error: {data.get('error')}")
-        return data
+    """Exchange OAuth code for user token."""
+    resp = requests.post(
+        SLACK_TOKEN_URL,
+        data={
+            "client_id": settings.slack_client_id,
+            "client_secret": settings.slack_client_secret,
+            "code": code,
+            "redirect_uri": settings.app_base_url,
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise ValueError(f"Slack OAuth error: {data.get('error')}")
+    return data
 
 
 def get_user_info(user_token: str, user_id: str) -> dict:
-    """Fetch user profile via users.info — synchronous HTTP call."""
-    with httpx.Client(
+    """Fetch user profile via users.info."""
+    resp = requests.get(
+        SLACK_USERS_INFO_URL,
+        params={"user": user_id},
         headers={"Authorization": f"Bearer {user_token}"},
-        timeout=10.0,
-    ) as client:
-        resp = client.get(SLACK_USERS_INFO_URL, params={"user": user_id})
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get("ok"):
-            raise ValueError(f"Slack users.info error: {data.get('error')}")
-        return data.get("user", {})
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise ValueError(f"Slack users.info error: {data.get('error')}")
+    return data.get("user", {})
 
 
 async def save_slack_token(
