@@ -32,17 +32,17 @@ def run(coro):
 def _format_standup_body(text: str) -> str:
     """Format standup message text for readable display.
 
-    Standup bot messages arrive as a single run-on string (no newlines), or
-    with bare \\n that markdown collapses to spaces.  We normalise to a flat
-    string first, then re-apply structure in four passes:
+    Standup bot messages use Slack mrkdwn: bold question headers are wrapped
+    in *...* and bullet answers follow as inline • sequences.
 
-      1. Paragraph break (\\n\\n) after each '?' → separates questions.
-      2. Paragraph break before common standup question-starter words that
-         follow non-'?' text (e.g. "...SHAs What do you…").
-      3. Soft line break (markdown '  \\n') before inline Slack emoji codes
-         (:word:) so they sit on their own line above the bullets.
-      4. Soft line break before each '•' bullet → one bullet per line,
-         visually grouped with the preceding header without blank gaps.
+    Strategy:
+      1. Normalise existing newlines to spaces so both stored formats are
+         handled consistently.
+      2. Insert a paragraph break (\\n\\n) before each *bold section* that
+         follows non-whitespace content — this separates answer bullets from
+         the next question header without breaking inside the header itself.
+      3. Convert inline bullet sequences to one bullet per soft line break
+         (markdown '  \\n') so they stay visually grouped with their header.
     """
     import re
 
@@ -50,27 +50,15 @@ def _format_standup_body(text: str) -> str:
     if not text:
         return text
 
-    # Normalise: collapse all existing newlines/whitespace to a single space so
-    # both stored formats (with/without \\n) go through the same path.
+    # Step 1: normalise — collapse all newlines to single spaces
     text = re.sub(r"\s*\n\s*", " ", text).strip()
 
-    # Pass 1: paragraph break after '?' followed by more content
-    text = re.sub(r"\?(\s+)(\S)", lambda m: "?\n\n" + m.group(2), text)
+    # Step 2: paragraph break before each *bold header* that follows content
+    # Matches: non-whitespace char, optional spaces, then opening *
+    # Uses negative lookbehind so we don't double-insert on already-split text
+    text = re.sub(r"(\S) +(\*\S)", lambda m: m.group(1) + "\n\n" + m.group(2), text)
 
-    # Pass 2: paragraph break before common question starters mid-text
-    _Q_STARTERS = (
-        "What ", "Any ", "How ", "Did ", "Do ", "Have ",
-        "Is ", "Are ", "Were ", "Can ", "Please ",
-    )
-    q_pattern = r"(\S)\s+(" + "|".join(re.escape(q) for q in _Q_STARTERS) + ")"
-    text = re.sub(q_pattern, lambda m: m.group(1) + "\n\n" + m.group(2), text)
-
-    # Pass 3: soft line break before Slack emoji codes (:word:) that sit
-    # between a question and its bullet answers (e.g. "?\n\n:singha: •").
-    text = re.sub(r"(\S) +(:[a-z_]+:)", r"\1  \n\2", text)
-
-    # Pass 4: soft line break before each bullet so they stay visually grouped
-    # with the preceding emoji/header without an extra blank paragraph.
+    # Step 3: one bullet per line (soft markdown line break '  \n')
     text = re.sub(r" *• +", "  \n• ", text)
 
     return text.strip()
@@ -346,16 +334,17 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
             _by_channel[_ch_key].append(_item)
 
         for _ch_name, _msgs in sorted(_by_channel.items()):
-            with st.expander(f"#{_ch_name} ({len(_msgs)})", expanded=False):
-                for item in _msgs:
-                    icon = _SLACK_ICONS.get(item["type"], "💬")
-                    ts   = item["timestamp"]
-                    body = item["body"] or item["title"] or "(empty)"
+            st.markdown(f"**#{_ch_name}** &nbsp; <small>{len(_msgs)} message(s)</small>", unsafe_allow_html=True)
+            for item in _msgs:
+                icon = _SLACK_ICONS.get(item["type"], "💬")
+                ts   = item["timestamp"]
+                body = item["body"] or item["title"] or "(empty)"
 
-                    col_icon, col_body, col_ts = st.columns([0.3, 5, 1.5])
-                    col_icon.markdown(icon)
-                    col_body.markdown(body)
-                    col_ts.caption(ts)
+                col_icon, col_body, col_ts = st.columns([0.3, 5, 1.5])
+                col_icon.markdown(icon)
+                col_body.markdown(body)
+                col_ts.caption(ts)
+            st.markdown("---")
 
 # ─── Share Summary ────────────────────────────────────────────────────────────
 
