@@ -1,28 +1,32 @@
 """
 Engineering Operations Manager — Streamlit UI
 
-This is the main entry point. It also handles OAuth callbacks from
-Slack and GitHub (both redirect back to the root URL with ?code=...).
-
-Deploy to Streamlit Community Cloud for a free public HTTPS URL —
-use that URL as the OAuth callback in your Slack and GitHub app settings.
+OAuth callbacks from Slack and GitHub both redirect to this root page.
+We detect the provider via the `state` query param prefix.
 """
 
 import asyncio
 import os
+import traceback
+
+import nest_asyncio
 import streamlit as st
 
-# Inject Streamlit Cloud secrets into os.environ before any app imports.
-# Locally the app reads from .env; on Streamlit Cloud it reads from st.secrets.
-# pydantic-settings picks up whichever is present via os.environ.
+# ── Inject Streamlit Cloud secrets into os.environ ────────────────────────────
+# Must happen before any app imports so pydantic-settings picks them up.
 for _key, _val in st.secrets.items():
     if isinstance(_val, str):
         os.environ.setdefault(_key.upper(), _val)
 
+# Allow nested event loops — required for asyncio.run() inside Streamlit Cloud
+nest_asyncio.apply()
+
 from app.database import AsyncSessionLocal
 from app.slack.oauth import exchange_code, save_slack_token
 from app.github.oauth import link_github_to_user
-from app.tasks.ingestion_tasks import trigger_github_sync, trigger_backfill
+from app.config import get_settings
+
+settings = get_settings()
 
 st.set_page_config(
     page_title="Engineering Operations Manager",
@@ -31,13 +35,12 @@ st.set_page_config(
 )
 
 
-def run(coro):
-    return asyncio.run(coro)
+def run_async(coro):
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(coro)
 
 
 # ─── OAuth Callback Handler ───────────────────────────────────────────────────
-# Both Slack and GitHub redirect back to the root Streamlit URL.
-# We detect which one via the `state` query param prefix.
 
 params = st.query_params
 
@@ -45,50 +48,66 @@ if "code" in params:
     code = params["code"]
     state = params.get("state", "")
 
-    # Slack callback — state starts with "slack:"
+    # ── Slack callback ─────────────────────────────────────────────────────────
     if state.startswith("slack:"):
-        try:
-            # exchange_code is sync; save_slack_token is async (DB only)
-            token_data = exchange_code(code)
+        with st.status("Connecting Slack account...", expanded=True) as status:
+            try:
+                st.write("Exchanging OAuth code with Slack...")
+                token_data = exchange_code(code)
+                st.write("✓ Token received")
 
-            async def _slack_cb():
-                async with AsyncSessionLocal() as db:
-                    return await save_slack_token(db, token_data)
+                st.write("Saving to database...")
+                async def _slack_cb():
+                    async with AsyncSessionLocal() as db:
+                        return await save_slack_token(db, token_data)
 
-            token = run(_slack_cb())
-            st.query_params.clear()
-            st.session_state["slack_user_id"] = token.slack_user_id
-            st.session_state["slack_team_id"] = token.slack_team_id
-            st.session_state["slack_display_name"] = token.slack_display_name
-            st.success(f"✅ Slack connected as **{token.slack_display_name}** (team: {token.slack_team_name})")
-        except Exception as e:
-            st.error(f"Slack connection failed: {e}")
+                token = run_async(_slack_cb())
+                st.write("✓ Account saved")
 
-    # GitHub callback — state format is "github:{team_id}:{user_id}"
+                status.update(label="Slack connected!", state="complete")
+                st.query_params.clear()
+                st.session_state["slack_user_id"] = token.slack_user_id
+                st.session_state["slack_team_id"] = token.slack_team_id
+                st.session_state["slack_display_name"] = token.slack_display_name
+                st.success(
+                    f"✅ Signed in as **{token.slack_display_name}** "
+                    f"(team: {token.slack_team_name})"
+                )
+
+            except Exception as e:
+                status.update(label="Slack connection failed", state="error")
+                st.error(f"**Error:** {e}")
+                st.code(traceback.format_exc(), language="text")
+
+    # ── GitHub callback ────────────────────────────────────────────────────────
     elif state.startswith("github:"):
-        try:
-            _, slack_team_id, slack_user_id = state.split(":", 2)
+        with st.status("Connecting GitHub account...", expanded=True) as status:
+            try:
+                _, slack_team_id, slack_user_id = state.split(":", 2)
 
-            async def _github_cb():
-                async with AsyncSessionLocal() as db:
-                    link = await link_github_to_user(
-                        db=db,
-                        slack_user_id=slack_user_id,
-                        slack_team_id=slack_team_id,
-                        code=code,
-                    )
-                    return link
+                st.write("Exchanging OAuth code with GitHub...")
+                async def _github_cb():
+                    async with AsyncSessionLocal() as db:
+                        return await link_github_to_user(
+                            db=db,
+                            slack_user_id=slack_user_id,
+                            slack_team_id=slack_team_id,
+                            code=code,
+                        )
 
-            link = run(_github_cb())
-            trigger_github_sync.delay(
-                slack_user_id=slack_user_id,
-                slack_team_id=slack_team_id,
-                days_back=30,
-            )
-            st.query_params.clear()
-            st.success(f"✅ GitHub connected as **@{link.github_login}** — initial sync queued.")
-        except Exception as e:
-            st.error(f"GitHub connection failed: {e}")
+                link = run_async(_github_cb())
+                st.write("✓ GitHub account linked")
+
+                status.update(label="GitHub connected!", state="complete")
+                st.query_params.clear()
+                st.success(
+                    f"✅ GitHub connected as **@{link.github_login}**"
+                )
+
+            except Exception as e:
+                status.update(label="GitHub connection failed", state="error")
+                st.error(f"**Error:** {e}")
+                st.code(traceback.format_exc(), language="text")
 
 
 # ─── Home Page ────────────────────────────────────────────────────────────────
@@ -99,10 +118,10 @@ st.caption("Slack + GitHub activity intelligence for engineering leaders.")
 st.markdown("---")
 
 col1, col2, col3, col4 = st.columns(4)
-col1.page_link("pages/1_Connect.py",        label="🔗 Connect Accounts",  use_container_width=True)
-col2.page_link("pages/2_Work_Report.py",    label="📊 Work Report",       use_container_width=True)
-col3.page_link("pages/3_Team_Overview.py",  label="👥 Team Overview",     use_container_width=True)
-col4.page_link("pages/4_Sync.py",           label="🔄 Sync Data",         use_container_width=True)
+col1.page_link("pages/1_Connect.py",       label="🔗 Connect Accounts", use_container_width=True)
+col2.page_link("pages/2_Work_Report.py",   label="📊 Work Report",      use_container_width=True)
+col3.page_link("pages/3_Team_Overview.py", label="👥 Team Overview",    use_container_width=True)
+col4.page_link("pages/4_Sync.py",          label="🔄 Sync Data",        use_container_width=True)
 
 st.markdown("---")
 
