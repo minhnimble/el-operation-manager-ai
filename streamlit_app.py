@@ -40,7 +40,7 @@ def _db_host() -> str:
         return "(unable to parse)"
 
 st.set_page_config(
-    page_title="Engineering Operations Manager",
+    page_title="Home",
     page_icon="⚙️",
     layout="wide",
 )

@@ -240,8 +240,14 @@ st.subheader("Add Members")
 with st.expander("Browse workspace users", expanded=len(team_members) == 0):
     if st.button("Load workspace users", type="secondary"):
         with st.spinner("Fetching users from Slack..."):
-            ws_users = run(_get_workspace_users(slack_user_id, slack_team_id))
-            st.session_state["_ws_users"] = ws_users
+            try:
+                ws_users = run(_get_workspace_users(slack_user_id, slack_team_id))
+                st.session_state["_ws_users"] = ws_users
+                st.session_state.pop("_ws_users_error", None)
+            except Exception as exc:
+                import traceback
+                st.session_state["_ws_users_error"] = (str(exc), traceback.format_exc())
+                st.session_state.pop("_ws_users", None)
 
     ws_users: list[dict] = st.session_state.get("_ws_users", [])
 
@@ -292,8 +298,13 @@ with st.expander("Browse workspace users", expanded=len(team_members) == 0):
                     st.session_state.pop("_ws_users", None)
                     st.rerun()
 
+    elif "_ws_users_error" in st.session_state:
+        msg, tb = st.session_state["_ws_users_error"]
+        st.error(f"Failed to load workspace users: **{msg}**")
+        with st.expander("Full traceback"):
+            st.code(tb, language="text")
     elif "_ws_users" in st.session_state:
-        st.warning("Could not load workspace users. Make sure your Slack token is connected.")
+        st.warning("No users returned. Your Slack token may be missing the `users:read` scope — try reconnecting Slack.")
 
 st.markdown("---")
 

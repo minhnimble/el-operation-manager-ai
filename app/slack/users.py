@@ -26,11 +26,7 @@ async def list_workspace_users(ingester: SlackIngester) -> list[dict]:
         if cursor:
             params["cursor"] = cursor
 
-        try:
-            data = await ingester._get("users.list", params)
-        except Exception as exc:
-            logger.warning("users.list failed: %s", exc)
-            break
+        data = await ingester._get("users.list", params)
 
         for member in data.get("members", []):
             # Skip bots, deleted accounts, and the Slack bot itself
