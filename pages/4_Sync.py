@@ -201,7 +201,7 @@ else:
         f"including **{selected_name}**. No separate token needed."
     )
 
-days_slack = st.slider("Days to backfill", min_value=1, max_value=90, value=30, key="slack_days")
+days_slack = st.slider("Days to backfill", min_value=1, max_value=90, value=7, key="slack_days")
 
 if st.button("Sync Slack", type="primary"):
     with st.spinner(f"Syncing Slack messages for the last {days_slack} days…"):
@@ -244,7 +244,7 @@ else:
     else:
         st.caption(f"Syncing GitHub for **{selected_name}** (@{gh_login}).")
 
-    days_github = st.slider("Days to backfill", min_value=1, max_value=90, value=30, key="github_days")
+    days_github = st.slider("Days to backfill", min_value=1, max_value=90, value=7, key="github_days")
 
     if st.button("Sync GitHub", type="primary"):
         with st.spinner(f"Syncing GitHub activity for the last {days_github} days…"):
