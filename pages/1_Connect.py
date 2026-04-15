@@ -31,17 +31,20 @@ def run(coro):
 
 
 def _oauth_button(label: str, url: str, primary: bool = True) -> None:
-    """Open the OAuth URL in a small popup window.
+    """Render an OAuth link that navigates the top-level browser tab.
 
-    A popup is a real top-level browser window — not an iframe — so Slack and
-    GitHub load without hitting X-Frame-Options.  After auth the popup detects
-    it was opened by a parent and auto-closes while reloading the parent tab.
-    This avoids both the embedded-iframe error and the two-tabs-left-open UX.
+    All programmatic approaches (window.top.location.href, window.open) are
+    blocked by Firefox's sandbox restrictions on Streamlit's component iframe.
+    A plain <a href target="_top"> driven by a real user click is the only
+    navigation type that 'allow-top-navigation-by-user-activation' permits —
+    it bypasses both the iframe sandbox and Streamlit's React link interceptors.
     """
-    import json
+    import html as _html
     import streamlit.components.v1 as components
 
-    js_url = json.dumps(url)
+    # Escape & < > " in the URL so it's safe to embed in an href attribute
+    safe_href = _html.escape(url, quote=True)
+
     bg     = "#ff4b4b" if primary else "transparent"
     fg     = "#ffffff" if primary else "#31333f"
     border = "#ff4b4b" if primary else "#d0d0d0"
@@ -49,14 +52,21 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
     components.html(
         f"""
         <div style="margin:2px 0 6px 0;">
-          <button
-            onclick="window.open({js_url}, 'oauth_popup', 'width=720,height=800,left=200,top=80')"
-            style="background:{bg};color:{fg};border:1px solid {border};
-                   border-radius:6px;padding:6px 18px;font-size:14px;
-                   font-weight:500;cursor:pointer;font-family:sans-serif;
-                   line-height:1.5;">
+          <a href="{safe_href}" target="_top" style="
+              display:inline-block;
+              background:{bg};
+              color:{fg};
+              border:1px solid {border};
+              border-radius:6px;
+              padding:6px 18px;
+              font-size:14px;
+              font-weight:500;
+              font-family:sans-serif;
+              line-height:1.5;
+              text-decoration:none;
+              cursor:pointer;">
             {label}
-          </button>
+          </a>
         </div>
         """,
         height=48,
