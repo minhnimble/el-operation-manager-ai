@@ -42,7 +42,7 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
         bg, fg, border = "transparent", "#31333f", "#d0d0d0"  # secondary style
 
     st.markdown(
-        f"""<a href="{url}" target="_self" style="
+        f"""<a href="{url}" target="_top" style="
             display:inline-block;
             padding:0.4rem 1.1rem;
             background:{bg};
