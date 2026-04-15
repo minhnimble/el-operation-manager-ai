@@ -19,6 +19,7 @@ from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models.user import User
+from app.models.team_member import TeamMember
 from app.analytics.report_builder import build_work_report, format_report_for_slack
 from app.ai.schemas import WorkReport
 
@@ -29,15 +30,30 @@ def run(coro):
     return asyncio.run(coro)
 
 
-async def _get_users(team_id: str) -> list[User]:
+async def _get_team_options(
+    manager_user_id: str,
+    manager_team_id: str,
+    self_name: str,
+) -> dict[str, str]:
+    """Return {display_name: slack_user_id} for self + all added team members."""
+    options: dict[str, str] = {self_name: manager_user_id}
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(User).where(
-                User.slack_team_id == team_id,
-                User.opted_in == True,  # noqa: E712
-            )
+            select(TeamMember).where(
+                TeamMember.manager_slack_user_id == manager_user_id,
+                TeamMember.manager_slack_team_id == manager_team_id,
+            ).order_by(TeamMember.member_display_name)
         )
-        return result.scalars().all()
+        members = result.scalars().all()
+
+    for m in members:
+        name = m.display()
+        # Avoid key collision if display name matches self
+        key = name if name != self_name else f"{name} (team)"
+        options[key] = m.member_slack_user_id
+
+    return options
 
 
 async def _get_report(slack_user_id, slack_team_id, start, end, include_ai) -> WorkReport:
@@ -71,17 +87,14 @@ if not slack_user_id:
 col1, col2, col3 = st.columns([2, 2, 1])
 
 with col1:
-    users = run(_get_users(slack_team_id))
-    user_options = {
-        (u.slack_display_name or u.slack_real_name or u.slack_user_id): u.slack_user_id
-        for u in users
-    }
-    # Always include self
     self_name = st.session_state.get("slack_display_name", slack_user_id)
-    if self_name not in user_options:
-        user_options = {self_name: slack_user_id, **user_options}
+    user_options = run(_get_team_options(slack_user_id, slack_team_id, self_name))
 
-    selected_name = st.selectbox("Team member", options=list(user_options.keys()))
+    selected_name = st.selectbox(
+        "Team member",
+        options=list(user_options.keys()),
+        help="Add team members on the Team Overview page.",
+    )
     target_user_id = user_options[selected_name]
 
 with col2:

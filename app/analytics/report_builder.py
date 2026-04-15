@@ -13,6 +13,7 @@ from sqlalchemy import select, func
 
 from app.models.work_unit import WorkUnit, WorkUnitType, WorkUnitSource, WorkCategory
 from app.models.user import User
+from app.models.team_member import TeamMember
 from app.ai.schemas import WorkReport, StandupExtraction
 from app.ai.work_extractor import WorkExtractor
 from app.ai.insight_generator import InsightGenerator
@@ -33,15 +34,24 @@ async def build_work_report(
     if include_ai is None:
         include_ai = settings.enable_ai_extraction
 
-    # Resolve user display name
+    # Resolve display name — check User table first (signed-in users),
+    # then fall back to TeamMember (members added by an EM who haven't signed in).
     user_result = await db.execute(
         select(User).where(User.slack_user_id == slack_user_id)
     )
     user = user_result.scalar_one_or_none()
-    display_name = (
-        user.slack_display_name or user.slack_real_name or slack_user_id
-        if user else slack_user_id
-    )
+
+    if user:
+        display_name = user.slack_display_name or user.slack_real_name or slack_user_id
+    else:
+        member_result = await db.execute(
+            select(TeamMember).where(
+                TeamMember.member_slack_user_id == slack_user_id,
+                TeamMember.member_slack_team_id == slack_team_id,
+            ).limit(1)
+        )
+        member = member_result.scalar_one_or_none()
+        display_name = member.display() if member else slack_user_id
 
     date_range = f"{start_date.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}"
 
