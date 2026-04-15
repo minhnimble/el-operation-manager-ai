@@ -13,6 +13,7 @@ Standup handling covers two common bot patterns:
        the message to the correct Slack user ID.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import AsyncIterator
@@ -46,10 +47,22 @@ class SlackIngester:
     async def close(self) -> None:
         await self._client.aclose()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10),
+    @retry(stop=stop_after_attempt(6), wait=wait_exponential(min=1, max=10),
            reraise=True)
     async def _get(self, endpoint: str, params: dict) -> dict:
         resp = await self._client.get(f"/{endpoint}", params=params)
+
+        # Handle rate limiting: sleep for the server-requested duration then
+        # raise so tenacity retries the request.
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", "30"))
+            logger.warning(
+                "Slack rate limit hit on %s — waiting %ds before retry",
+                endpoint, retry_after,
+            )
+            await asyncio.sleep(retry_after)
+            raise RuntimeError(f"Rate limited [{endpoint}] — retrying")
+
         resp.raise_for_status()
         data = resp.json()
         if not data.get("ok"):
@@ -78,6 +91,8 @@ class SlackIngester:
             cursor = data.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
+            # conversations.list is Tier 2 (~20 req/min) — be conservative
+            await asyncio.sleep(1.0)
         return channels
 
     async def get_joined_channels(self) -> tuple[list[dict], list[str]]:
@@ -205,6 +220,9 @@ class SlackIngester:
             if not cursor or not data.get("has_more"):
                 break
 
+            # Small pause between pages to stay well under Slack's rate limits
+            await asyncio.sleep(0.5)
+
     async def iter_thread_replies(
         self,
         channel_id: str,
@@ -236,6 +254,9 @@ class SlackIngester:
             cursor = data.get("response_metadata", {}).get("next_cursor")
             if not cursor or not data.get("has_more"):
                 break
+
+            # Small pause between pages to stay well under Slack's rate limits
+            await asyncio.sleep(0.5)
 
     # ── Name → user-id resolution (for bot-posted standup summaries) ───────────
 
