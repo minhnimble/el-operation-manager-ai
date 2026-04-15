@@ -23,10 +23,12 @@ SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
 
 USER_SCOPES = [
-    "channels:history",
-    "channels:read",
-    "users:read",
-    "users:read.email",
+    "channels:history",   # read public channel messages
+    "channels:read",      # list public channels
+    "groups:history",     # read private channel messages
+    "groups:read",        # list private channels
+    "users:read",         # resolve user profiles
+    "users:read.email",   # resolve user emails
 ]
 
 
