@@ -46,7 +46,8 @@ class SlackIngester:
     async def close(self) -> None:
         await self._client.aclose()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10),
+           reraise=True)
     async def _get(self, endpoint: str, params: dict) -> dict:
         resp = await self._client.get(f"/{endpoint}", params=params)
         resp.raise_for_status()
@@ -55,26 +56,54 @@ class SlackIngester:
             raise RuntimeError(f"Slack API error [{endpoint}]: {data.get('error')}")
         return data
 
-    async def get_joined_channels(self) -> list[dict]:
-        """Return all public channels the authenticated user is a member of."""
+    async def _list_channels(self, types: str) -> list[dict]:
+        """Paginate conversations.list for the given channel types."""
         channels = []
         cursor = None
         while True:
             params: dict = {
-                "types": "public_channel,private_channel",
+                "types": types,
                 "exclude_archived": "true",
                 "limit": 200,
             }
             if cursor:
                 params["cursor"] = cursor
             data = await self._get("conversations.list", params)
-            channels.extend(
-                ch for ch in data["channels"] if ch.get("is_member")
-            )
+            channels.extend(ch for ch in data["channels"] if ch.get("is_member"))
             cursor = data.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
         return channels
+
+    async def get_joined_channels(self) -> list[dict]:
+        """Return all public + private channels the authenticated user is a member of.
+
+        Falls back to public-only if the token lacks the groups:read scope
+        needed for private channels.
+        """
+        try:
+            return await self._list_channels("public_channel,private_channel")
+        except Exception as e:
+            # Unwrap RetryError to get the real cause
+            cause = getattr(e, "last_attempt", None)
+            if cause is not None:
+                try:
+                    cause = cause.result()
+                except Exception as inner:
+                    cause = inner
+            else:
+                cause = e
+
+            err_str = str(cause).lower()
+            if any(kw in err_str for kw in ("missing_scope", "not_allowed", "invalid_types")):
+                logger.warning(
+                    "Token lacks groups:read scope — falling back to public channels only. "
+                    "Reconnect Slack with the groups:read scope to include private channels."
+                )
+                return await self._list_channels("public_channel")
+
+            # Any other error: re-raise with the real message, not the RetryError wrapper
+            raise RuntimeError(str(cause)) from None
 
     async def iter_channel_messages(
         self,
