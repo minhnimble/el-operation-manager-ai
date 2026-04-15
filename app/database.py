@@ -5,11 +5,18 @@ from app.config import get_settings
 
 settings = get_settings()
 
+# Supabase Transaction Pooler requires prepared statements to be disabled.
+# This is a no-op for direct connections.
+_connect_args = {}
+if "pooler.supabase.com" in settings.database_url:
+    _connect_args = {"statement_cache_size": 0}
+
 engine = create_async_engine(
     settings.database_url,
     pool_size=settings.database_pool_size,
     max_overflow=5,
     echo=not settings.is_production,
+    connect_args=_connect_args,
 )
 
 AsyncSessionLocal = async_sessionmaker(

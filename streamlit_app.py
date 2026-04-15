@@ -28,6 +28,17 @@ from app.config import get_settings
 
 settings = get_settings()
 
+
+def _db_host() -> str:
+    """Extract host from DATABASE_URL for diagnostics (no credentials)."""
+    try:
+        url = settings.database_url
+        # postgresql+asyncpg://user:pass@host:port/db
+        host_part = url.split("@")[-1].split("/")[0]
+        return host_part
+    except Exception:
+        return "(unable to parse)"
+
 st.set_page_config(
     page_title="Engineering Operations Manager",
     page_icon="⚙️",
@@ -56,7 +67,7 @@ if "code" in params:
                 token_data = exchange_code(code)
                 st.write("✓ Token received")
 
-                st.write("Saving to database...")
+                st.write(f"Saving to database (host: `{_db_host()}`)...")
                 async def _slack_cb():
                     async with AsyncSessionLocal() as db:
                         return await save_slack_token(db, token_data)
