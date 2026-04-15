@@ -21,12 +21,14 @@ for _key, _val in st.secrets.items():
         os.environ.setdefault(_key.upper(), _val)
 
 from datetime import datetime, timedelta
-from sqlalchemy import select
+from sqlalchemy import select, delete, func
 
 from app.database import AsyncSessionLocal
 from app.models.team_member import TeamMember
 from app.models.user import User, UserGitHubLink
 from app.models.slack_token import SlackUserToken
+from app.models.raw_data import SlackMessage
+from app.models.work_unit import WorkUnit
 from app.ingestion.slack_ingester import SlackIngester
 from app.ingestion.github_ingester import GitHubIngester
 from app.normalization.normalizer import normalize_slack_messages, normalize_github_activities
@@ -155,6 +157,89 @@ async def _normalize_slack(team_id: str) -> int:
         count = await normalize_slack_messages(db, team_id=team_id)
         await db.commit()
         return count
+
+
+async def _get_valid_channel_ids(
+    access_token: str, team_id: str, target_user_id: str
+) -> tuple[list[str], list[str]]:
+    """Return (valid_channel_ids, valid_channel_names) for target_user_id.
+
+    Applies the same ignore list and member-filter used during sync.
+    """
+    ingester = SlackIngester(user_token=access_token, team_id=team_id)
+    try:
+        all_channels, _ = await ingester.get_joined_channels()
+        channels = [
+            ch for ch in all_channels
+            if not _should_skip_channel(ch.get("name", ""))
+        ]
+        ids: list[str] = []
+        names: list[str] = []
+        for ch in channels:
+            if await ingester.is_member(ch["id"], target_user_id):
+                ids.append(ch["id"])
+                names.append(ch.get("name", ch["id"]))
+        return ids, names
+    finally:
+        await ingester.close()
+
+
+async def _count_stale_slack_data(
+    target_user_id: str, team_id: str, valid_channel_ids: list[str]
+) -> tuple[int, int]:
+    """Return (slack_message_count, work_unit_count) outside valid channels."""
+    async with AsyncSessionLocal() as db:
+        msg_count = await db.scalar(
+            select(func.count()).select_from(SlackMessage).where(
+                SlackMessage.slack_user_id == target_user_id,
+                SlackMessage.slack_team_id == team_id,
+                SlackMessage.channel_id.not_in(valid_channel_ids) if valid_channel_ids
+                else SlackMessage.slack_team_id == team_id,  # safety: keep all if list empty
+            )
+        )
+        wu_count = await db.scalar(
+            select(func.count()).select_from(WorkUnit).where(
+                WorkUnit.slack_user_id == target_user_id,
+                WorkUnit.slack_team_id == team_id,
+                WorkUnit.slack_channel_id.is_not(None),
+                WorkUnit.slack_channel_id.not_in(valid_channel_ids) if valid_channel_ids
+                else WorkUnit.slack_team_id == team_id,
+            )
+        )
+    return msg_count or 0, wu_count or 0
+
+
+async def _delete_stale_slack_data(
+    target_user_id: str, team_id: str, valid_channel_ids: list[str]
+) -> tuple[int, int]:
+    """Delete SlackMessages and WorkUnits outside valid channels.
+
+    Returns (deleted_messages, deleted_work_units).
+    Aborts and returns (0, 0) if valid_channel_ids is empty (safety guard).
+    """
+    if not valid_channel_ids:
+        return 0, 0
+
+    async with AsyncSessionLocal() as db:
+        # Remove WorkUnits first (they reference SlackMessage via slack_message_ts)
+        wu_result = await db.execute(
+            delete(WorkUnit).where(
+                WorkUnit.slack_user_id == target_user_id,
+                WorkUnit.slack_team_id == team_id,
+                WorkUnit.slack_channel_id.is_not(None),
+                WorkUnit.slack_channel_id.not_in(valid_channel_ids),
+            )
+        )
+        # Remove the raw SlackMessage rows
+        msg_result = await db.execute(
+            delete(SlackMessage).where(
+                SlackMessage.slack_user_id == target_user_id,
+                SlackMessage.slack_team_id == team_id,
+                SlackMessage.channel_id.not_in(valid_channel_ids),
+            )
+        )
+        await db.commit()
+    return msg_result.rowcount, wu_result.rowcount
 
 
 # ── GitHub helpers (one asyncio.run() per step) ───────────────────────────────
@@ -382,6 +467,77 @@ if st.button("Sync Slack", type="primary"):
         with st.expander(f"{len(errors)} channel(s) had errors"):
             for err in errors:
                 st.warning(err)
+
+# ─── Clean up stale channel data ──────────────────────────────────────────────
+
+with st.expander("🗑️ Clean up stale channel data", expanded=False):
+    st.caption(
+        "Removes **SlackMessages** and **WorkUnits** that were synced for "
+        f"**{selected_name}** but belong to channels they are no longer (or never were) "
+        "a member of. Run this after adjusting the ignore list or team membership."
+    )
+
+    _ck_preview  = f"_cleanup_preview_{target_user_id}"
+    _ck_valid    = f"_cleanup_valid_{target_user_id}"
+    _ck_confirm  = f"_cleanup_confirm_{target_user_id}"
+
+    col_preview, col_confirm, col_cancel = st.columns([2, 2, 1])
+
+    with col_preview:
+        if st.button("Preview stale data", key=f"preview_cleanup_{target_user_id}"):
+            with st.spinner("Checking channels…"):
+                try:
+                    access_token_cleanup = run(_get_slack_token(slack_user_id, slack_team_id))
+                    valid_ids, valid_names = run(
+                        _get_valid_channel_ids(access_token_cleanup, slack_team_id, target_user_id)
+                    )
+                    msg_c, wu_c = run(
+                        _count_stale_slack_data(target_user_id, slack_team_id, valid_ids)
+                    )
+                    st.session_state[_ck_valid]   = valid_ids
+                    st.session_state[_ck_preview] = (msg_c, wu_c, valid_names)
+                    st.session_state[_ck_confirm] = False
+                except Exception as e:
+                    st.error(f"Could not load channels: {e}")
+
+    if _ck_preview in st.session_state:
+        msg_c, wu_c, valid_names = st.session_state[_ck_preview]
+        valid_ids = st.session_state.get(_ck_valid, [])
+        st.info(
+            f"**{selected_name}** is a member of **{len(valid_names)}** synced channel(s): "
+            f"{', '.join(f'#{n}' for n in valid_names[:10])}"
+            + (f" … and {len(valid_names) - 10} more" if len(valid_names) > 10 else "")
+        )
+        if msg_c == 0 and wu_c == 0:
+            st.success("✅ No stale data found — everything looks clean.")
+        else:
+            st.warning(
+                f"Found **{msg_c}** SlackMessage(s) and **{wu_c}** WorkUnit(s) "
+                "outside those channels."
+            )
+            with col_confirm:
+                if st.button(
+                    f"Delete {msg_c} messages + {wu_c} work units",
+                    type="primary",
+                    key=f"confirm_cleanup_{target_user_id}",
+                ):
+                    st.session_state[_ck_confirm] = True
+
+            if st.session_state.get(_ck_confirm):
+                with st.spinner("Deleting stale data…"):
+                    try:
+                        del_msgs, del_wus = run(
+                            _delete_stale_slack_data(target_user_id, slack_team_id, valid_ids)
+                        )
+                        st.success(
+                            f"🗑️ Deleted **{del_msgs}** SlackMessage(s) and "
+                            f"**{del_wus}** WorkUnit(s) from stale channels."
+                        )
+                        # Clear state so preview refreshes on next run
+                        for k in (_ck_preview, _ck_valid, _ck_confirm):
+                            st.session_state.pop(k, None)
+                    except Exception as e:
+                        st.error(f"Deletion failed: {e}")
 
 st.markdown("---")
 

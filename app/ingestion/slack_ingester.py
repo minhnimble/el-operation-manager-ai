@@ -19,7 +19,7 @@ from typing import AsyncIterator
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.models.raw_data import SlackMessage
@@ -308,7 +308,27 @@ class SlackIngester:
         existing = await db.execute(
             select(SlackMessage).where(SlackMessage.message_ts == ts)
         )
-        if existing.scalar_one_or_none():
+        existing_record = existing.scalar_one_or_none()
+        if existing_record:
+            # If we have a user_id override and the existing record is under a
+            # different user, update it so the message appears in the right report.
+            if uid and existing_record.slack_user_id != uid:
+                await db.execute(
+                    update(SlackMessage)
+                    .where(SlackMessage.message_ts == ts)
+                    .values(slack_user_id=uid)
+                )
+                # Also fix any already-normalized WorkUnit so the report picks it up
+                from app.models.work_unit import WorkUnit
+                await db.execute(
+                    update(WorkUnit)
+                    .where(WorkUnit.slack_message_ts == ts)
+                    .values(slack_user_id=uid)
+                )
+                logger.debug(
+                    "Re-attributed message %s from %s to %s",
+                    ts, existing_record.slack_user_id, uid,
+                )
             return False
 
         thread_ts = msg.get("thread_ts")
@@ -388,9 +408,17 @@ class SlackIngester:
                         if reply.get("subtype", "") in {"channel_join", "channel_leave"}:
                             continue
                         if self._is_relevant(reply, filter_user_id):
+                            # Attribute to filter_user_id if relevant only due to mention
+                            reply_sender = reply.get("user", "")
+                            reply_override = (
+                                filter_user_id
+                                if (filter_user_id and reply_sender != filter_user_id)
+                                else None
+                            )
                             if await self._save_message(
                                 db, reply, channel_id, channel_name,
                                 is_standup=is_standup, is_reply=True,
+                                user_id=reply_override,
                             ):
                                 saved += 1
                 continue
@@ -398,9 +426,17 @@ class SlackIngester:
             # ── Regular user messages ────────────────────────────────────────
             if subtype not in {"bot_message"}:
                 if self._is_relevant(msg, filter_user_id):
+                    # Attribute to filter_user_id if relevant only due to mention
+                    sender = msg.get("user", "")
+                    override_uid = (
+                        filter_user_id
+                        if (filter_user_id and sender != filter_user_id)
+                        else None
+                    )
                     if await self._save_message(
                         db, msg, channel_id, channel_name,
                         is_standup=is_standup, is_reply=False,
+                        user_id=override_uid,
                     ):
                         saved += 1
 
@@ -430,9 +466,17 @@ class SlackIngester:
                                     saved += 1
                     elif not reply_subtype or reply_subtype not in {"bot_message"}:
                         if self._is_relevant(reply, filter_user_id):
+                            # Attribute to filter_user_id if relevant only due to mention
+                            reply_sender = reply.get("user", "")
+                            reply_override = (
+                                filter_user_id
+                                if (filter_user_id and reply_sender != filter_user_id)
+                                else None
+                            )
                             if await self._save_message(
                                 db, reply, channel_id, channel_name,
                                 is_standup=is_standup, is_reply=True,
+                                user_id=reply_override,
                             ):
                                 saved += 1
 
