@@ -43,6 +43,8 @@ _IGNORED_CHANNEL_EXACT = {
     "cat-place",
     "hardware-and-machinery",
     "badminton",
+    "ios-rss",
+    "watercooler",
 }
 _IGNORED_CHANNEL_SUFFIXES = ("-activity", "-corner")
 _IGNORED_CHANNEL_PREFIXES = ("ic-", "nimble")

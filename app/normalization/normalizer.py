@@ -54,48 +54,64 @@ async def normalize_slack_messages(
         return 0
 
     created = 0
-    for msg in messages:
-        # Dedup: skip if a WorkUnit already exists for this Slack message timestamp.
-        # Covers the case where a previous sync committed the WorkUnit but crashed
-        # before marking the SlackMessage as processed.
-        existing_wu = await db.execute(
-            select(WorkUnit.id).where(WorkUnit.slack_message_ts == msg.message_ts)
-        )
-        if existing_wu.scalar_one_or_none() is not None:
-            # WorkUnit already exists — just mark the raw record processed and move on.
-            await db.execute(
-                update(SlackMessage).where(SlackMessage.id == msg.id).values(processed=True)
+    # Track ts values added in this batch so the dedup SELECT (which queries the
+    # DB, not the in-session pending objects) doesn't miss them.  Combined with
+    # no_autoflush this prevents the "Query-invoked autoflush" IntegrityError
+    # that fires when a SELECT triggers a flush of a pending WorkUnit whose
+    # slack_message_ts already exists in the DB.
+    seen_ts: set[str] = set()
+
+    async with db.no_autoflush:
+        for msg in messages:
+            ts = msg.message_ts
+
+            # In-batch duplicate (same ts appeared more than once in the batch)
+            if ts in seen_ts:
+                await db.execute(
+                    update(SlackMessage).where(SlackMessage.id == msg.id).values(processed=True)
+                )
+                continue
+
+            # Dedup: skip if a WorkUnit already exists for this Slack message timestamp.
+            existing_wu = await db.execute(
+                select(WorkUnit.id).where(WorkUnit.slack_message_ts == ts)
             )
-            continue
+            if existing_wu.scalar_one_or_none() is not None:
+                await db.execute(
+                    update(SlackMessage).where(SlackMessage.id == msg.id).values(processed=True)
+                )
+                continue
 
-        wu_type = _classify_slack_message(msg)
-        text = msg.text or ""
-        title = text[:100] + ("..." if len(text) > 100 else "")
+            wu_type = _classify_slack_message(msg)
+            text = msg.text or ""
+            title = text[:100] + ("..." if len(text) > 100 else "")
 
-        work_unit = WorkUnit(
-            slack_user_id=msg.slack_user_id,
-            slack_team_id=msg.slack_team_id,
-            source=WorkUnitSource.SLACK,
-            type=wu_type,
-            title=title,
-            body=text,
-            slack_channel_id=msg.channel_id,
-            slack_message_ts=msg.message_ts,
-            timestamp=msg.timestamp,
-            extra_data={
-                "channel_name": msg.channel_name,
-                "thread_ts": msg.thread_ts,
-            },
-        )
-        db.add(work_unit)
+            work_unit = WorkUnit(
+                slack_user_id=msg.slack_user_id,
+                slack_team_id=msg.slack_team_id,
+                source=WorkUnitSource.SLACK,
+                type=wu_type,
+                title=title,
+                body=text,
+                slack_channel_id=msg.channel_id,
+                slack_message_ts=ts,
+                timestamp=msg.timestamp,
+                extra_data={
+                    "channel_name": msg.channel_name,
+                    "thread_ts": msg.thread_ts,
+                },
+            )
+            db.add(work_unit)
+            seen_ts.add(ts)
 
-        await db.execute(
-            update(SlackMessage)
-            .where(SlackMessage.id == msg.id)
-            .values(processed=True)
-        )
-        created += 1
+            await db.execute(
+                update(SlackMessage)
+                .where(SlackMessage.id == msg.id)
+                .values(processed=True)
+            )
+            created += 1
 
+    # Single explicit flush after the loop — no autoflush surprises mid-batch.
     await db.flush()
     logger.info("Normalized %d Slack messages for team %s", created, team_id)
     return created
@@ -118,44 +134,56 @@ async def normalize_github_activities(
         return 0
 
     created = 0
-    for act in activities:
-        wu_type = _GITHUB_TYPE_MAP.get(act.activity_type, WorkUnitType.COMMIT)
+    seen_refs: set[tuple[str, str, str]] = set()
 
-        # Dedup: skip if a WorkUnit already exists for this GitHub ref.
-        existing_wu = await db.execute(
-            select(WorkUnit.id).where(
-                WorkUnit.github_ref_id == act.ref_id,
-                WorkUnit.github_repo == act.repo_full_name,
-                WorkUnit.type == wu_type,
+    async with db.no_autoflush:
+        for act in activities:
+            wu_type = _GITHUB_TYPE_MAP.get(act.activity_type, WorkUnitType.COMMIT)
+            ref_key = (act.ref_id or "", act.repo_full_name or "", wu_type.value)
+
+            # In-batch duplicate
+            if ref_key in seen_refs:
+                await db.execute(
+                    update(GitHubActivity).where(GitHubActivity.id == act.id).values(processed=True)
+                )
+                continue
+
+            # Dedup: skip if a WorkUnit already exists for this GitHub ref.
+            existing_wu = await db.execute(
+                select(WorkUnit.id).where(
+                    WorkUnit.github_ref_id == act.ref_id,
+                    WorkUnit.github_repo == act.repo_full_name,
+                    WorkUnit.type == wu_type,
+                )
             )
-        )
-        if existing_wu.scalar_one_or_none() is not None:
+            if existing_wu.scalar_one_or_none() is not None:
+                await db.execute(
+                    update(GitHubActivity).where(GitHubActivity.id == act.id).values(processed=True)
+                )
+                continue
+
+            work_unit = WorkUnit(
+                slack_user_id=act.slack_user_id,
+                slack_team_id=act.slack_team_id,
+                github_login=act.github_login,
+                source=WorkUnitSource.GITHUB,
+                type=wu_type,
+                title=act.title,
+                url=act.url,
+                github_repo=act.repo_full_name,
+                github_ref_id=act.ref_id,
+                timestamp=act.activity_at,
+                extra_data=act.raw_payload,
+            )
+            db.add(work_unit)
+            seen_refs.add(ref_key)
+
             await db.execute(
-                update(GitHubActivity).where(GitHubActivity.id == act.id).values(processed=True)
+                update(GitHubActivity)
+                .where(GitHubActivity.id == act.id)
+                .values(processed=True)
             )
-            continue
-
-        work_unit = WorkUnit(
-            slack_user_id=act.slack_user_id,
-            slack_team_id=act.slack_team_id,
-            github_login=act.github_login,
-            source=WorkUnitSource.GITHUB,
-            type=wu_type,
-            title=act.title,
-            url=act.url,
-            github_repo=act.repo_full_name,
-            github_ref_id=act.ref_id,
-            timestamp=act.activity_at,
-            extra_data=act.raw_payload,
-        )
-        db.add(work_unit)
-
-        await db.execute(
-            update(GitHubActivity)
-            .where(GitHubActivity.id == act.id)
-            .values(processed=True)
-        )
-        created += 1
+            created += 1
 
     await db.flush()
     logger.info("Normalized %d GitHub activities for team %s", created, team_id)
