@@ -51,7 +51,19 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
     components.html(
         f"""
         <a href="#"
-           onclick="window.open('{safe_href}', '_blank'); window.top.close(); return false;"
+           onclick="
+             window.open('{safe_href}', '_blank');
+             try {{
+               window.top.close();
+             }} catch(e) {{}}
+             try {{
+               window.top.document.body.innerHTML =
+                 '<div style=\\'font-family:sans-serif;padding:60px;text-align:center;\\'>'
+                 + '<h2>&#x1F517; OAuth opened in new tab</h2>'
+                 + '<p>Please complete sign-in there. You can close this tab.</p>'
+                 + '</div>';
+             }} catch(e) {{}}
+             return false;"
            style="
                display:inline-block;
                background:{bg};
