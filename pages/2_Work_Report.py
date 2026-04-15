@@ -30,38 +30,13 @@ def run(coro):
 
 
 def _copy_button(text: str, key: str) -> None:
-    """Render a small clipboard copy button for the given text.
+    """Render a copy button using st.popover.
 
-    Uses a self-contained HTML component so the JavaScript clipboard API works
-    without any Streamlit state round-trip.  The button label toggles to '✓'
-    for 1.5 s after a successful copy.
+    Clicking opens a popover with the message text in a st.code block.
+    The code block has a native Streamlit copy icon in its top-right corner.
     """
-    import json
-    import streamlit.components.v1 as components
-
-    js_text = json.dumps(text)          # safely escapes quotes, newlines, etc.
-    components.html(
-        f"""
-        <button
-            title="Copy to clipboard"
-            onclick="navigator.clipboard.writeText({js_text}).then(()=>{{
-                this.innerHTML='✓&nbsp;Copied';
-                this.style.borderColor='#22c55e';
-                this.style.color='#22c55e';
-                setTimeout(()=>{{
-                    this.innerHTML='📋&nbsp;Copy';
-                    this.style.borderColor='#d1d5db';
-                    this.style.color='#6b7280';
-                }}, 1500);
-            }})"
-            style="background:none;border:1px solid #d1d5db;border-radius:5px;
-                   padding:3px 10px;cursor:pointer;font-size:12px;color:#6b7280;
-                   font-family:inherit;line-height:1.4;white-space:nowrap;">
-            📋&nbsp;Copy
-        </button>
-        """,
-        height=34,
-    )
+    with st.popover("📋", help="Copy message"):
+        st.code(text, language=None)
 
 
 def _format_standup_body(text: str) -> str:

@@ -96,6 +96,19 @@ async def build_work_report(
     standups = standup_result.scalars().all()
     standup_texts = [wu.body for wu in standups if wu.body and wu.body.strip()]
 
+    # Build channel_id → channel_name lookup from SlackMessage for fallback
+    from app.models.raw_data import SlackMessage as _SlackMessage
+    _ch_rows = await db.execute(
+        select(_SlackMessage.channel_id, _SlackMessage.channel_name)
+        .where(_SlackMessage.slack_team_id == slack_team_id)
+        .distinct()
+    )
+    _channel_name_map: dict[str, str] = {
+        row.channel_id: row.channel_name
+        for row in _ch_rows.all()
+        if row.channel_id and row.channel_name
+    }
+
     # Fetch recent activity for the feed (most recent 100, all types)
     activity_result = await db.execute(
         select(WorkUnit).where(
@@ -113,7 +126,10 @@ async def build_work_report(
             "github_repo": wu.github_repo or "",
             "slack_channel_id": wu.slack_channel_id or "",
             "channel_name": (
-                (wu.extra_data or {}).get("channel_name") or wu.slack_channel_id or ""
+                (wu.extra_data or {}).get("channel_name")
+                or _channel_name_map.get(wu.slack_channel_id or "")
+                or wu.slack_channel_id
+                or ""
             ),
             "timestamp": wu.timestamp.strftime("%b %d, %Y %H:%M"),
         }
