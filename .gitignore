@@ -30,6 +30,7 @@ ENV/
 
 # Streamlit secrets
 .streamlit/secrets.toml
+.certs/
 
 # pytest
 .pytest_cache/

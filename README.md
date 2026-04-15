@@ -114,6 +114,7 @@ No worker process needed — all syncs run inline in the Streamlit session.
 
 - Config source: `.env` (auto-loaded by `pydantic-settings` in `app/config.py`)
 - `secrets.toml` is optional locally
+- Local TLS certs live in `.certs/` and are gitignored (`.certs/` should not be committed)
 - Recommended `APP_BASE_URL`:
 
 ```env
@@ -128,6 +129,28 @@ streamlit run streamlit_app.py \
   --server.address localhost \
   --server.sslCertFile .certs/localhost.pem \
   --server.sslKeyFile .certs/localhost-key.pem
+```
+
+#### Create local HTTPS certs
+
+Preferred (trusted locally):
+
+```bash
+brew install mkcert
+mkcert -install
+mkdir -p .certs
+mkcert -key-file .certs/localhost-key.pem -cert-file .certs/localhost.pem localhost 127.0.0.1 ::1
+```
+
+Fallback (self-signed):
+
+```bash
+mkdir -p .certs
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout .certs/localhost-key.pem \
+  -out .certs/localhost.pem \
+  -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1"
 ```
 
 - Local OAuth redirect URL (Slack + GitHub):
