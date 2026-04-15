@@ -109,6 +109,27 @@ class SlackIngester:
 
         return public + private, warnings
 
+    async def is_member(self, channel_id: str, user_id: str) -> bool:
+        """Return True if user_id is a member of channel_id.
+
+        Paginates conversations.members and exits as soon as the user is found,
+        so for channels where the user IS a member this is typically one API call.
+        """
+        cursor = None
+        while True:
+            params: dict = {"channel": channel_id, "limit": 200}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                data = await self._get("conversations.members", params)
+            except RuntimeError:
+                return False
+            if user_id in data.get("members", []):
+                return True
+            cursor = data.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                return False
+
     async def iter_channel_messages(
         self,
         channel_id: str,
@@ -239,6 +260,26 @@ class SlackIngester:
         )
         return result.scalar_one_or_none()
 
+    # ── Relevance filter ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_relevant(msg: dict, user_id: str | None, resolved_uid: str | None = None) -> bool:
+        """Return True if the message should be saved for this user.
+
+        A message is relevant when:
+        - The sender IS the user  (msg["user"] == user_id or resolved_uid matches)
+        - The user is @mentioned  (<@USER_ID> or <@USER_ID|name> in text)
+
+        When user_id is None the message is always relevant (no filter applied).
+        """
+        if user_id is None:
+            return True
+        effective_uid = resolved_uid or msg.get("user", "")
+        if effective_uid == user_id:
+            return True
+        text = msg.get("text", "")
+        return f"<@{user_id}>" in text or f"<@{user_id}|" in text
+
     # ── Message persistence ────────────────────────────────────────────────────
 
     async def _save_message(
@@ -294,8 +335,12 @@ class SlackIngester:
         channel_name: str,
         slack_user_id: str,
         oldest: datetime | None = None,
+        filter_user_id: str | None = None,
     ) -> int:
         """Backfill a channel into SlackMessage table. Returns count saved.
+
+        filter_user_id — when set, only messages sent by OR mentioning this
+        user are stored. Pass None to store all messages (EM syncing for self).
 
         Handles two standup-bot patterns:
         - Thread replies: bot asks question top-level; users reply in-thread
@@ -317,7 +362,6 @@ class SlackIngester:
                 continue
 
             # ── Bot-posted standup summaries (Geekbot-style) ─────────────────
-            # The bot posts with username=<member's full name> and no `user` field.
             if subtype == "bot_message" and is_standup:
                 bot_username = (
                     msg.get("username")
@@ -325,21 +369,25 @@ class SlackIngester:
                 ).strip()
                 if bot_username:
                     resolved_uid = await self._resolve_user_by_name(db, bot_username)
-                    if resolved_uid:
+                    # For bot standup messages the ONLY valid check is whether the
+                    # name resolves to the target user — mentions don't apply here
+                    # (we don't want Alice's standup just because it mentions Don).
+                    uid_matches = (
+                        resolved_uid is not None
+                        and (filter_user_id is None or resolved_uid == filter_user_id)
+                    )
+                    if uid_matches:
                         if await self._save_message(
                             db, msg, channel_id, channel_name,
                             is_standup=True, is_reply=False,
                             user_id=resolved_uid,
                         ):
                             saved += 1
-                # Don't fall through — handled above (or intentionally skipped)
-                # Still fetch thread replies on this bot message if any
                 if msg.get("reply_count", 0) > 0:
                     async for reply in self.iter_thread_replies(channel_id, ts, oldest_ts):
                         if reply.get("subtype", "") in {"channel_join", "channel_leave"}:
                             continue
-                        reply_uid = reply.get("user")
-                        if reply_uid:
+                        if self._is_relevant(reply, filter_user_id):
                             if await self._save_message(
                                 db, reply, channel_id, channel_name,
                                 is_standup=is_standup, is_reply=True,
@@ -349,18 +397,18 @@ class SlackIngester:
 
             # ── Regular user messages ────────────────────────────────────────
             if subtype not in {"bot_message"}:
-                if await self._save_message(
-                    db, msg, channel_id, channel_name,
-                    is_standup=is_standup, is_reply=False,
-                ):
-                    saved += 1
+                if self._is_relevant(msg, filter_user_id):
+                    if await self._save_message(
+                        db, msg, channel_id, channel_name,
+                        is_standup=is_standup, is_reply=False,
+                    ):
+                        saved += 1
 
             # Fetch thread replies for any message that has them
             if msg.get("reply_count", 0) > 0:
                 async for reply in self.iter_thread_replies(channel_id, ts, oldest_ts):
                     if reply.get("subtype", "") in {"channel_join", "channel_leave"}:
                         continue
-                    # Bot replies in threads: try name resolution in standup channels
                     reply_subtype = reply.get("subtype", "")
                     if reply_subtype == "bot_message" and is_standup:
                         bot_username = (
@@ -369,7 +417,11 @@ class SlackIngester:
                         ).strip()
                         if bot_username:
                             resolved_uid = await self._resolve_user_by_name(db, bot_username)
-                            if resolved_uid:
+                            uid_matches = (
+                                resolved_uid is not None
+                                and (filter_user_id is None or resolved_uid == filter_user_id)
+                            )
+                            if uid_matches:
                                 if await self._save_message(
                                     db, reply, channel_id, channel_name,
                                     is_standup=True, is_reply=True,
@@ -377,10 +429,11 @@ class SlackIngester:
                                 ):
                                     saved += 1
                     elif not reply_subtype or reply_subtype not in {"bot_message"}:
-                        if await self._save_message(
-                            db, reply, channel_id, channel_name,
-                            is_standup=is_standup, is_reply=True,
-                        ):
+                        if self._is_relevant(reply, filter_user_id):
+                            if await self._save_message(
+                                db, reply, channel_id, channel_name,
+                                is_standup=is_standup, is_reply=True,
+                            ):
                             saved += 1
 
         await db.flush()

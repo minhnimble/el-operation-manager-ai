@@ -35,9 +35,14 @@ st.set_page_config(page_title="Sync Data", page_icon="🔄", layout="wide")
 
 # ── Channel ignore list ────────────────────────────────────────────────────────
 
-_IGNORED_CHANNEL_EXACT = {"access-requests", "nimble-code-war"}
+_IGNORED_CHANNEL_EXACT = {
+    "access-requests",
+    "vn-community",
+    "cat-place",
+    "hardware-and-machinery",
+}
 _IGNORED_CHANNEL_SUFFIXES = ("-activity", "-corner")
-_IGNORED_CHANNEL_PREFIXES = ("ic-",)
+_IGNORED_CHANNEL_PREFIXES = ("ic-", "nimble-")
 
 
 def _should_skip_channel(name: str) -> bool:
@@ -96,6 +101,21 @@ async def _get_slack_channels(access_token: str, team_id: str) -> tuple[list[dic
         await ingester.close()
 
 
+async def _filter_channels_by_member(
+    access_token: str, team_id: str, channels: list[dict], user_id: str
+) -> list[dict]:
+    """Return only channels that user_id is a member of."""
+    ingester = SlackIngester(user_token=access_token, team_id=team_id)
+    try:
+        result = []
+        for ch in channels:
+            if await ingester.is_member(ch["id"], user_id):
+                result.append(ch)
+        return result
+    finally:
+        await ingester.close()
+
+
 async def _sync_slack_channel(
     access_token: str,
     team_id: str,
@@ -103,8 +123,12 @@ async def _sync_slack_channel(
     channel_id: str,
     channel_name: str,
     oldest: datetime,
+    filter_user_id: str | None = None,
 ) -> tuple[int, str | None]:
-    """Sync one channel. Returns (messages_saved, error_or_None)."""
+    """Sync one channel. Returns (messages_saved, error_or_None).
+
+    filter_user_id — when set, only messages from or mentioning this user are saved.
+    """
     async with AsyncSessionLocal() as db:
         ingester = SlackIngester(user_token=access_token, team_id=team_id)
         try:
@@ -114,6 +138,7 @@ async def _sync_slack_channel(
                 channel_name=channel_name,
                 slack_user_id=slack_user_id,
                 oldest=oldest,
+                filter_user_id=filter_user_id,
             )
             await db.commit()
             return count, None
@@ -285,10 +310,23 @@ if st.button("Sync Slack", type="primary"):
                 if not _should_skip_channel(ch.get("name", ""))
             ]
             skipped = len(all_channels) - len(channels)
+
+            # When syncing a specific team member, filter to channels they're in.
+            # The EM's token lists the EM's channels — the target may not be in all of them.
+            if target_user_id != slack_user_id:
+                st.write(
+                    f"Checking which of the {len(channels)} channel(s) "
+                    f"**{selected_name}** is a member of…"
+                )
+                channels = run(
+                    _filter_channels_by_member(access_token, slack_team_id, channels, target_user_id)
+                )
+                st.write(f"  → **{selected_name}** is in **{len(channels)}** channel(s).")
+
             skip_note = f", {skipped} ignored" if skipped else ""
             st.write(
                 f"Found **{len(public_ch)}** public + **{len(private_ch)}** private "
-                f"= **{len(channels)}** channel(s) to sync{skip_note}."
+                f"channels{skip_note}. Syncing **{len(channels)}**."
             )
         except Exception as e:
             slack_progress.empty()
@@ -307,8 +345,14 @@ if st.button("Sync Slack", type="primary"):
             slack_status_text.caption(f"⏳ #{ch_name}")
             st.write(f"📥 #{ch_name}")
 
+            # Filter to target user's messages when syncing a team member
+            member_filter = target_user_id if target_user_id != slack_user_id else None
             count, err = run(
-                _sync_slack_channel(access_token, slack_team_id, slack_user_id, ch_id, ch_name, oldest)
+                _sync_slack_channel(
+                    access_token, slack_team_id, slack_user_id,
+                    ch_id, ch_name, oldest,
+                    filter_user_id=member_filter,
+                )
             )
             if err:
                 errors.append(f"#{ch_name}: {err}")
