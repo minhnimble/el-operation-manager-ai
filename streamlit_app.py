@@ -10,6 +10,7 @@ import traceback
 
 import nest_asyncio
 import streamlit as st
+import streamlit.components.v1 as _components
 
 from app.streamlit_env import load_streamlit_secrets_into_env
 
@@ -84,6 +85,15 @@ if "code" in params:
                     f"✅ Signed in as **{token.slack_display_name}** "
                     f"(team: {token.slack_team_name})"
                 )
+                # If auth happened in a popup, reload the parent tab and close popup
+                _components.html("""
+                <script>
+                if (window.opener && !window.opener.closed) {
+                    window.opener.location.reload();
+                    setTimeout(function() { window.close(); }, 800);
+                }
+                </script>
+                """, height=0)
 
             except Exception as e:
                 status.update(label="Slack connection failed", state="error")
@@ -116,6 +126,15 @@ if "code" in params:
                 st.success(
                     f"✅ GitHub connected as **@{link.github_login}**"
                 )
+                # If auth happened in a popup, reload the parent tab and close popup
+                _components.html("""
+                <script>
+                if (window.opener && !window.opener.closed) {
+                    window.opener.location.reload();
+                    setTimeout(function() { window.close(); }, 800);
+                }
+                </script>
+                """, height=0)
 
             except Exception as e:
                 status.update(label="GitHub connection failed", state="error")

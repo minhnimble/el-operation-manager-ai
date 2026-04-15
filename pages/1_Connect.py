@@ -31,19 +31,17 @@ def run(coro):
 
 
 def _oauth_button(label: str, url: str, primary: bool = True) -> None:
-    """Render an OAuth redirect button that navigates the top-level browser window.
+    """Open the OAuth URL in a small popup window.
 
-    st.link_button always opens a new tab.  st.markdown anchor tags are subject
-    to Streamlit's iframe sandbox which can block even target="_top" on some
-    browsers.  Using components.html + window.top.location.href bypasses both:
-    the script runs in a same-origin component iframe so window.top is accessible,
-    and the navigation targets the real browser tab — Slack/GitHub never get
-    embedded in any iframe.
+    A popup is a real top-level browser window — not an iframe — so Slack and
+    GitHub load without hitting X-Frame-Options.  After auth the popup detects
+    it was opened by a parent and auto-closes while reloading the parent tab.
+    This avoids both the embedded-iframe error and the two-tabs-left-open UX.
     """
     import json
     import streamlit.components.v1 as components
 
-    js_url = json.dumps(url)   # safe JS string — handles & ? = etc.
+    js_url = json.dumps(url)
     bg     = "#ff4b4b" if primary else "transparent"
     fg     = "#ffffff" if primary else "#31333f"
     border = "#ff4b4b" if primary else "#d0d0d0"
@@ -52,7 +50,7 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
         f"""
         <div style="margin:2px 0 6px 0;">
           <button
-            onclick="window.top.location.href={js_url}"
+            onclick="window.open({js_url}, 'oauth_popup', 'width=720,height=800,left=200,top=80')"
             style="background:{bg};color:{fg};border:1px solid {border};
                    border-radius:6px;padding:6px 18px;font-size:14px;
                    font-weight:500;cursor:pointer;font-family:sans-serif;
