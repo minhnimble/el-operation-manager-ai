@@ -202,8 +202,9 @@ st.markdown("---")
 st.subheader("📋 Activity Feed")
 st.caption("Raw activity captured in this period.")
 
-github_items = [a for a in report.recent_activity if a["source"] == "github"]
-slack_items  = [a for a in report.recent_activity if a["source"] == "slack"]
+_activity    = getattr(report, "recent_activity", [])
+github_items = [a for a in _activity if a["source"] == "github"]
+slack_items  = [a for a in _activity if a["source"] == "slack"]
 
 # ── GitHub activity ──────────────────────────────────────────────────────────
 
