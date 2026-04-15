@@ -31,45 +31,42 @@ def run(coro):
 
 
 def _oauth_button(label: str, url: str, primary: bool = True) -> None:
-    """Render an OAuth link that navigates the top-level browser tab.
+    """Open the OAuth URL in a new tab via window.open() so that window.opener
+    is set in that tab.  The callback page (streamlit_app.py) then reloads
+    this tab through window.top.opener and closes itself.
 
-    All programmatic approaches (window.top.location.href, window.open) are
-    blocked by Firefox's sandbox restrictions on Streamlit's component iframe.
-    A plain <a href target="_top"> driven by a real user click is the only
-    navigation type that 'allow-top-navigation-by-user-activation' permits —
-    it bypasses both the iframe sandbox and Streamlit's React link interceptors.
+    Using onclick/window.open() (not target="_blank") is intentional: browsers
+    silently add noopener to HTML target=_blank cross-origin links since 2021,
+    which would make window.opener null in the new tab and break the close-back
+    flow.  window.open() from a JS handler always preserves the opener reference.
     """
     import html as _html
-    import streamlit.components.v1 as components
 
-    # Escape & < > " in the URL so it's safe to embed in an href attribute
     safe_href = _html.escape(url, quote=True)
+    safe_label = _html.escape(label)
 
     bg     = "#ff4b4b" if primary else "transparent"
     fg     = "#ffffff" if primary else "#31333f"
     border = "#ff4b4b" if primary else "#d0d0d0"
 
-    components.html(
-        f"""
-        <div style="margin:2px 0 6px 0;">
-          <a href="{safe_href}" target="_top" style="
-              display:inline-block;
-              background:{bg};
-              color:{fg};
-              border:1px solid {border};
-              border-radius:6px;
-              padding:6px 18px;
-              font-size:14px;
-              font-weight:500;
-              font-family:sans-serif;
-              line-height:1.5;
-              text-decoration:none;
-              cursor:pointer;">
-            {label}
-          </a>
-        </div>
-        """,
-        height=48,
+    st.markdown(
+        f"""<a href="#"
+            onclick="window.open('{safe_href}', '_blank'); return false;"
+            style="
+                display:inline-block;
+                background:{bg};
+                color:{fg};
+                border:1px solid {border};
+                border-radius:6px;
+                padding:8px 20px;
+                font-size:14px;
+                font-weight:500;
+                font-family:sans-serif;
+                line-height:1.5;
+                text-decoration:none;
+                cursor:pointer;
+                margin:4px 0 8px 0;">{safe_label}</a>""",
+        unsafe_allow_html=True,
     )
 
 

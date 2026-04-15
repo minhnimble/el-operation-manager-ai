@@ -85,13 +85,21 @@ if "code" in params:
                     f"✅ Signed in as **{token.slack_display_name}** "
                     f"(team: {token.slack_team_name})"
                 )
-                # If auth happened in a popup, reload the parent tab and close popup
+                # Reload the original tab (window.opener set by window.open()
+                # in the Connect page button) then close this new tab.
+                # window.top.opener works from inside the component iframe
+                # because it's same-origin with the Streamlit top frame.
                 _components.html("""
                 <script>
-                if (window.opener && !window.opener.closed) {
-                    window.opener.location.reload();
-                    setTimeout(function() { window.close(); }, 800);
-                }
+                try {
+                    var opener = window.top.opener;
+                    if (opener && !opener.closed) {
+                        opener.location.reload();
+                    }
+                } catch(e) {}
+                setTimeout(function() {
+                    try { window.top.close(); } catch(e) {}
+                }, 800);
                 </script>
                 """, height=0)
 
@@ -126,13 +134,17 @@ if "code" in params:
                 st.success(
                     f"✅ GitHub connected as **@{link.github_login}**"
                 )
-                # If auth happened in a popup, reload the parent tab and close popup
                 _components.html("""
                 <script>
-                if (window.opener && !window.opener.closed) {
-                    window.opener.location.reload();
-                    setTimeout(function() { window.close(); }, 800);
-                }
+                try {
+                    var opener = window.top.opener;
+                    if (opener && !opener.closed) {
+                        opener.location.reload();
+                    }
+                } catch(e) {}
+                setTimeout(function() {
+                    try { window.top.close(); } catch(e) {}
+                }, 800);
                 </script>
                 """, height=0)
 
