@@ -29,6 +29,48 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def _format_standup_body(text: str) -> str:
+    """Format standup message text for readable display.
+
+    Slack standup bot messages are often stored as a single run-on string with
+    no newlines, or with bare \\n that markdown collapses into spaces.  This
+    function:
+      1. Splits on existing newlines and re-joins with paragraph spacing.
+      2. When the text has no newlines, detects question boundaries (text
+         ending with '?') and inserts paragraph breaks before each new section.
+      3. Converts inline bullet sequences '• item • item' to one bullet per line.
+    """
+    import re
+
+    text = text.strip()
+    if not text:
+        return text
+
+    if "\n" in text:
+        # Already has line structure — just ensure paragraph spacing for markdown
+        lines = [ln.strip() for ln in text.splitlines()]
+        # Convert inline bullets within a single line
+        expanded: list[str] = []
+        for ln in lines:
+            if ln:
+                ln = re.sub(r"\s*•\s+", "\n• ", ln).strip()
+            expanded.append(ln)
+        # Collapse blanks then join with double newline for paragraph breaks
+        result: list[str] = []
+        for ln in expanded:
+            if ln == "" and result and result[-1] == "":
+                continue  # deduplicate blank lines
+            result.append(ln)
+        return "\n\n".join(ln if ln else "" for ln in result)
+    else:
+        # No newlines — detect question boundaries and split there
+        # Insert paragraph break after each '?' that is followed by more text
+        formatted = re.sub(r"\?(\s+)(\S)", lambda m: "?\n\n" + m.group(2), text)
+        # Convert inline bullets to one per line
+        formatted = re.sub(r"\s*•\s+", "\n• ", formatted)
+        return formatted.strip()
+
+
 async def _get_team_options(
     manager_user_id: str,
     manager_team_id: str,
@@ -257,7 +299,7 @@ with st.expander(f"Standups ({len(standups)})", expanded=len(standups) > 0):
             body = item["body"] or item["title"] or "(empty)"
             ch   = f"#{item['slack_channel_id']}" if item["slack_channel_id"] else ""
             st.markdown(f"**{ts}** {ch}")
-            st.markdown(body)
+            st.markdown(_format_standup_body(body))
             st.divider()
 
 with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
@@ -273,7 +315,7 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
 
             col_icon, col_body, col_ts = st.columns([0.3, 5, 1.5])
             col_icon.markdown(icon)
-            col_body.markdown(f"{body[:200]}{'…' if len(body) > 200 else ''} &nbsp; {ch}")
+            col_body.markdown(f"{body} &nbsp; {ch}")
             col_ts.caption(ts)
 
 # ─── Share Summary ────────────────────────────────────────────────────────────

@@ -77,8 +77,11 @@ GITHUB_CLIENT_SECRET=...
 # Anthropic — console.anthropic.com
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Your Streamlit Cloud app URL (or http://localhost:8501 for local dev)
-APP_BASE_URL=https://yourapp.streamlit.app
+# For local HTTPS OAuth testing:
+# APP_BASE_URL=https://localhost:8501
+# For Streamlit Cloud:
+# APP_BASE_URL=https://yourapp.streamlit.app
+APP_BASE_URL=https://localhost:8501
 ```
 
 ### 3. Start the database
@@ -105,6 +108,7 @@ make dev
 ```
 
 No worker process needed — all syncs run inline in the Streamlit session.
+For OAuth testing, use the HTTPS run command in **Local vs Streamlit Cloud Config**.
 
 ---
 
@@ -133,25 +137,17 @@ streamlit run streamlit_app.py \
 
 #### Create local HTTPS certs
 
-Preferred (trusted locally):
+Recommended (one command):
 
 ```bash
-brew install mkcert
-mkcert -install
-mkdir -p .certs
-mkcert -key-file .certs/localhost-key.pem -cert-file .certs/localhost.pem localhost 127.0.0.1 ::1
+./scripts/setup_local_https.sh
 ```
 
-Fallback (self-signed):
+This script will:
 
-```bash
-mkdir -p .certs
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout .certs/localhost-key.pem \
-  -out .certs/localhost.pem \
-  -subj "/CN=localhost" \
-  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1"
-```
+- use `mkcert` when available (trusted local cert)
+- fall back to `openssl` when `mkcert` is not installed
+- write files to `.certs/localhost.pem` and `.certs/localhost-key.pem`
 
 - Local OAuth redirect URL (Slack + GitHub):
 
@@ -207,11 +203,11 @@ users:read.email       — resolve user emails
 
 ### 3. Add Redirect URL
 
-Under **OAuth & Permissions → Redirect URLs**, add your app's root URL:
+Under **OAuth & Permissions → Redirect URLs**, add your app root URL from
+**Local vs Streamlit Cloud Config**:
 
-```
-https://yourapp.streamlit.app
-```
+- local: `https://localhost:8501`
+- cloud: `https://yourapp.streamlit.app`
 
 > OAuth callbacks are handled at the root URL via query parameters — no `/callback` path needed.
 
@@ -229,8 +225,8 @@ Go to **[github.com/settings/developers](https://github.com/settings/developers)
 
 | Field | Value |
 |---|---|
-| Homepage URL | `https://yourapp.streamlit.app` |
-| Authorization callback URL | `https://yourapp.streamlit.app` |
+| Homepage URL | local: `https://localhost:8501` or cloud: `https://yourapp.streamlit.app` |
+| Authorization callback URL | local: `https://localhost:8501` or cloud: `https://yourapp.streamlit.app` |
 
 Copy the **Client ID** and **Client Secret** into `.env`.
 
