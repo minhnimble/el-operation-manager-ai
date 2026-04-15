@@ -18,6 +18,11 @@ down:
 migrate:
 	alembic upgrade head
 
+# For Supabase: direct port 5432 may be blocked; use session pooler instead.
+# Usage: make migrate-supabase DB_URL="postgresql+asyncpg://postgres.xxxx:pass@aws-x-region.pooler.supabase.com:5432/postgres?ssl=require"
+migrate-supabase:
+	DATABASE_URL="$(DB_URL)" alembic upgrade head
+
 migrate-create:
 	@read -p "Migration name: " name; alembic revision --autogenerate -m "$$name"
 

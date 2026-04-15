@@ -194,13 +194,48 @@ Make sure your latest code is pushed to a GitHub repository.
 3. Set **Main file path** to `streamlit_app.py`
 4. Click **Deploy**
 
-### 3. Add secrets
+### 3. Set up the database (Supabase)
+
+Streamlit Cloud **blocks direct TCP connections to port 5432**, so a standard PostgreSQL URL will not work. You must use Supabase's **Transaction Pooler** instead.
+
+#### Get the Transaction Pooler URL
+
+1. Go to your Supabase project → **Settings** → **Database**
+2. Scroll to **Connection Pooling** → set Mode to **Transaction**
+3. Copy the connection string — it looks like:
+```
+postgresql://postgres.xxxx:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+```
+4. Change `postgresql://` → `postgresql+asyncpg://` and append `?ssl=require`:
+```
+postgresql+asyncpg://postgres.xxxx:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres?ssl=require
+```
+
+Use this URL as `DATABASE_URL` in Streamlit secrets.
+
+#### Run migrations separately
+
+The transaction pooler cannot run DDL migrations. Run them once from your **local machine** using the direct connection URL (port 5432):
+
+```bash
+DATABASE_URL="postgresql+asyncpg://postgres:[password]@db.xxxx.supabase.co:5432/postgres" alembic upgrade head
+```
+
+> The direct URL (port 5432) is only used for migrations from your local machine. The app always uses the pooler URL at runtime.
+
+| Connection type | Port | Streamlit Cloud |
+|---|---|---|
+| Direct (`db.xxxx.supabase.co`) | 5432 | ❌ Blocked |
+| Session pooler | 5432 | ❌ Blocked |
+| **Transaction pooler** | **6543** | **✅ Works** |
+
+### 4. Add secrets
 
 Once deployed, go to **⋮ → Settings → Secrets** and paste the following, filling in your values:
 
 ```toml
-DATABASE_URL      = "postgresql+asyncpg://user:password@host:5432/el_ops"
-REDIS_URL         = "redis://..."
+# Use the Transaction Pooler URL — NOT the direct connection URL
+DATABASE_URL = "postgresql+asyncpg://postgres.xxxx:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres?ssl=require"
 
 SLACK_CLIENT_ID     = "your-slack-client-id"
 SLACK_CLIENT_SECRET = "your-slack-client-secret"
@@ -218,7 +253,7 @@ ENABLE_AI_EXTRACTION = "true"
 
 > Keys must be **uppercase** to match the environment variable names the app expects.
 
-### 4. Update OAuth callback URLs
+### 5. Update OAuth callback URLs
 
 Copy your Streamlit app URL (e.g. `https://yourapp.streamlit.app`) and set it as the redirect/callback URL in both:
 
@@ -227,7 +262,7 @@ Copy your Streamlit app URL (e.g. `https://yourapp.streamlit.app`) and set it as
 
 Both OAuth flows redirect back to the root Streamlit URL — no `/callback` path needed.
 
-### 5. Reboot the app
+### 6. Reboot the app
 
 After saving secrets, click **Reboot app** to apply them.
 
