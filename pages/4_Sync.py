@@ -483,10 +483,11 @@ def _run_slack_sync_bg(
                 job["summary"] = f"❌ Failed: {e}"
                 return
 
+        total_members = len(target_users)
         for idx, (member_name, target_user_id) in enumerate(target_users):
             is_self_m = target_user_id == slack_user_id
-            job["progress"] = int(idx / len(target_users) * 94)
-            job["progress_text"] = f"Member {idx + 1}/{len(target_users)}: {member_name}…"
+            job["progress"] = int(idx / total_members * 94)
+            job["progress_text"] = f"Member {idx + 1}/{total_members}: {member_name}…"
 
             ms: dict = {"name": member_name, "status": "⏳", "detail": ""}
             job["member_statuses"].append(ms)
@@ -511,9 +512,17 @@ def _run_slack_sync_bg(
                         ))
                         _jlog(job, f"  → {len(channels)} channel(s).")
 
-                for ch in channels:
+                n_ch = max(len(channels), 1)
+                for ch_idx, ch in enumerate(channels):
                     ch_id   = ch["id"]
                     ch_name = ch.get("name", ch_id)
+                    # Per-channel progress: interpolate within this member's slice
+                    frac = (idx + ch_idx / n_ch) / total_members
+                    job["progress"] = int(frac * 94)
+                    job["progress_text"] = (
+                        f"[{idx + 1}/{total_members}] {member_name} · "
+                        f"#{ch_name} ({ch_idx + 1}/{len(channels)})"
+                    )
                     _jlog(job, f"  📥 #{ch_name}")
                     mf = None if is_self_m else target_user_id
                     count, err, unresolved = _run(_sync_slack_channel(
@@ -581,10 +590,11 @@ def _run_github_sync_bg(
     try:
         grand: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
 
+        total_members = len(members_with_gh)
         for idx, (member_name, target_user_id) in enumerate(members_with_gh):
             gh_login_d = gh_info[member_name][1]
-            job["progress"] = int(idx / len(members_with_gh) * 94)
-            job["progress_text"] = f"Member {idx + 1}/{len(members_with_gh)}: {member_name}…"
+            job["progress"] = int(idx / total_members * 94)
+            job["progress_text"] = f"Member {idx + 1}/{total_members}: {member_name}…"
 
             ms: dict = {"name": member_name, "status": "⏳", "detail": ""}
             job["member_statuses"].append(ms)
@@ -597,8 +607,16 @@ def _run_github_sync_bg(
                 _jlog(job, f"  Found {len(repos)} repo(s).")
 
                 tc: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
-                for repo in repos:
+                n_repos = max(len(repos), 1)
+                for r_idx, repo in enumerate(repos):
                     repo_name = repo["full_name"]
+                    # Per-repo progress: interpolate within this member's slice
+                    frac = (idx + r_idx / n_repos) / total_members
+                    job["progress"] = int(frac * 94)
+                    job["progress_text"] = (
+                        f"[{idx + 1}/{total_members}] {member_name} · "
+                        f"{repo_name} ({r_idx + 1}/{len(repos)})"
+                    )
                     _jlog(job, f"  📦 {repo_name}")
                     try:
                         counts = _run(_sync_github_repo(
