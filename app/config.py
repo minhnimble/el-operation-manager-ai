@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     # App
     app_env: str = "development"
     app_secret_key: str = "change-me"
-    app_base_url: str = "http://localhost:8000"
+    app_base_url: str = "https://localhost:8501"
 
     # Database
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/el_ops"

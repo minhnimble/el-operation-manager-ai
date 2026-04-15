@@ -8,6 +8,8 @@ where the code exchange is completed.
 
 import asyncio
 import secrets
+from urllib.parse import quote
+
 import streamlit as st
 
 from app.streamlit_env import load_streamlit_secrets_into_env
@@ -185,7 +187,7 @@ else:
             f"?client_id={settings.github_client_id}"
             f"&scope=read:user,repo"
             f"&state={github_state}"
-            f"&redirect_uri={settings.app_base_url}"
+            f"&redirect_uri={quote(settings.app_base_url, safe='')}"
         )
         _oauth_button("Reconnect GitHub (refresh token / scopes)", github_url, primary=False)
     else:
@@ -196,7 +198,7 @@ else:
             f"?client_id={settings.github_client_id}"
             f"&scope=read:user,repo"
             f"&state={github_state}"
-            f"&redirect_uri={settings.app_base_url}"
+            f"&redirect_uri={quote(settings.app_base_url, safe='')}"
         )
         _oauth_button("Connect GitHub", github_url)
 

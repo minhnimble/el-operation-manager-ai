@@ -6,6 +6,7 @@ when called from Streamlit's async/sync mixed context.
 """
 
 import logging
+from urllib.parse import quote
 
 import requests
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,7 +40,7 @@ def build_auth_url(state: str) -> str:
         f"?client_id={settings.slack_client_id}"
         f"&user_scope={scopes}"
         f"&state=slack:{state}"
-        f"&redirect_uri={settings.app_base_url}"
+        f"&redirect_uri={quote(settings.app_base_url, safe='')}"
     )
 
 
