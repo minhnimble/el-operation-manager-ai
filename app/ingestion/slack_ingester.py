@@ -109,6 +109,43 @@ class SlackIngester:
 
         return public + private, warnings
 
+    async def find_channels_by_names(self, names: set[str]) -> list[dict]:
+        """Return channel dicts whose name (lowercased) is in *names*.
+
+        Paginates both public and private channels and stops as soon as all
+        requested names are found, so it is much cheaper than loading the full
+        channel list when you only need a handful of specific channels.
+        """
+        remaining = {n.lower() for n in names}
+        found: list[dict] = []
+
+        for ch_type in ("public_channel", "private_channel"):
+            if not remaining:
+                break
+            cursor = None
+            while remaining:
+                params: dict = {
+                    "types": ch_type,
+                    "exclude_archived": "true",
+                    "limit": 200,
+                }
+                if cursor:
+                    params["cursor"] = cursor
+                try:
+                    data = await self._get("conversations.list", params)
+                except RuntimeError:
+                    break
+                for ch in data.get("channels", []):
+                    ch_name = ch.get("name", "").lower()
+                    if ch_name in remaining:
+                        found.append(ch)
+                        remaining.discard(ch_name)
+                cursor = data.get("response_metadata", {}).get("next_cursor")
+                if not cursor:
+                    break
+
+        return found
+
     async def is_member(self, channel_id: str, user_id: str) -> bool:
         """Return True if user_id is a member of channel_id.
 

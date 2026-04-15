@@ -13,12 +13,11 @@ connected their own GitHub account via OAuth for the sync to work.
 """
 
 import asyncio
-import os
 import streamlit as st
 
-for _key, _val in st.secrets.items():
-    if isinstance(_val, str):
-        os.environ.setdefault(_key.upper(), _val)
+from app.streamlit_env import load_streamlit_secrets_into_env
+
+load_streamlit_secrets_into_env()
 
 from datetime import datetime, timedelta
 from sqlalchemy import select, delete, func
@@ -171,6 +170,18 @@ async def _sync_slack_channel(
             return 0, str(e), []
         finally:
             await ingester.close()
+
+
+async def _get_standup_channels(access_token: str, team_id: str) -> list[dict]:
+    """Return channel dicts for every channel in _ALWAYS_INCLUDE_CHANNELS.
+
+    Bypasses the full channel list — fetches only the named channels directly.
+    """
+    ingester = SlackIngester(user_token=access_token, team_id=team_id)
+    try:
+        return await ingester.find_channels_by_names(_ALWAYS_INCLUDE_CHANNELS)
+    finally:
+        await ingester.close()
 
 
 async def _normalize_slack(team_id: str) -> int:
@@ -418,62 +429,66 @@ if sync_normal_clicked or sync_standup_clicked:
     slack_status_text = st.empty()
 
     with st.status("Sync log", expanded=True) as status:
-        # Step 1 — fetch token + channel list
+        # Step 1 — fetch token + resolve channels
         try:
             st.write("🔑 Fetching Slack token…")
             access_token = run(_get_slack_token(slack_user_id, slack_team_id))
 
-            st.write("📋 Loading joined channels…")
-            all_channels, ch_warnings = run(_get_slack_channels(access_token, slack_team_id))
-
-            for w in ch_warnings:
-                st.warning(w)
-
-            public_ch  = [c for c in all_channels if not c.get("is_private")]
-            private_ch = [c for c in all_channels if c.get("is_private")]
-            total = len(all_channels)
-
-            # Apply ignore list
-            channels = [
-                ch for ch in all_channels
-                if not _should_skip_channel(ch.get("name", ""))
-            ]
-            skipped = total - len(channels)
-
-            # Print the raw totals first so every subsequent number makes sense
-            skip_note = f", **{skipped}** ignored" if skipped else ""
-            st.write(
-                f"Found **{len(public_ch)}** public + **{len(private_ch)}** private "
-                f"= **{total}** channel(s){skip_note} → **{len(channels)}** to check."
-            )
-
-            # When syncing a specific team member, filter to channels they're in.
-            # The EM's token lists the EM's channels — the target may not be in all of them.
-            if target_user_id != slack_user_id:
+            if slack_sync_mode == "standup":
+                # ── Standup: skip full channel discovery, look up by name directly ──
                 st.write(
-                    f"Checking which of those **{len(channels)}** channel(s) "
-                    f"**{selected_name}** is a member of…"
+                    f"📋 Looking up standup channel(s): "
+                    + ", ".join(f"**#{n}**" for n in sorted(_ALWAYS_INCLUDE_CHANNELS))
+                    + "…"
                 )
-                channels = run(
-                    _filter_channels_by_member(access_token, slack_team_id, channels, target_user_id)
-                )
-                st.write(f"  → **{selected_name}** is in **{len(channels)}** — syncing those.")
+                channels = run(_get_standup_channels(access_token, slack_team_id))
+                if not channels:
+                    st.warning("No standup channels found — check that the channel names in `_ALWAYS_INCLUDE_CHANNELS` are correct.")
+                else:
+                    names_found = ", ".join(f"#**{ch.get('name', ch['id'])}**" for ch in channels)
+                    st.write(f"  → Found {names_found}.")
+            else:
+                # ── Normal: full channel discovery + ignore list + member filter ──
+                st.write("📋 Loading joined channels…")
+                all_channels, ch_warnings = run(_get_slack_channels(access_token, slack_team_id))
 
-            # ── Apply mode filter ──────────────────────────────────────────────
-            # "normal"  → all channels except always-include standup ones
-            # "standup" → only always-include standup channels
-            if slack_sync_mode == "normal":
+                for w in ch_warnings:
+                    st.warning(w)
+
+                public_ch  = [c for c in all_channels if not c.get("is_private")]
+                private_ch = [c for c in all_channels if c.get("is_private")]
+                total = len(all_channels)
+
+                # Apply ignore list
+                channels = [
+                    ch for ch in all_channels
+                    if not _should_skip_channel(ch.get("name", ""))
+                ]
+                skipped = total - len(channels)
+
+                # Print the raw totals first so every subsequent number makes sense
+                skip_note = f", **{skipped}** ignored" if skipped else ""
+                st.write(
+                    f"Found **{len(public_ch)}** public + **{len(private_ch)}** private "
+                    f"= **{total}** channel(s){skip_note} → **{len(channels)}** to check."
+                )
+
+                # Exclude standup channels from normal sync
                 channels = [
                     ch for ch in channels
                     if ch.get("name", "").lower() not in _ALWAYS_INCLUDE_CHANNELS
                 ]
-                st.write(f"  → Mode: **normal messages** — syncing **{len(channels)}** channel(s) (standup excluded).")
-            else:
-                channels = [
-                    ch for ch in channels
-                    if ch.get("name", "").lower() in _ALWAYS_INCLUDE_CHANNELS
-                ]
-                st.write(f"  → Mode: **daily standup** — syncing **{len(channels)}** standup channel(s).")
+
+                # When syncing a specific team member, filter to channels they're in.
+                if target_user_id != slack_user_id:
+                    st.write(
+                        f"Checking which of those **{len(channels)}** channel(s) "
+                        f"**{selected_name}** is a member of…"
+                    )
+                    channels = run(
+                        _filter_channels_by_member(access_token, slack_team_id, channels, target_user_id)
+                    )
+                    st.write(f"  → **{selected_name}** is in **{len(channels)}** — syncing those.")
 
         except Exception as e:
             slack_progress.empty()

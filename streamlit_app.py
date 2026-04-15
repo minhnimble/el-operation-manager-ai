@@ -6,17 +6,15 @@ We detect the provider via the `state` query param prefix.
 """
 
 import asyncio
-import os
 import traceback
 
 import nest_asyncio
 import streamlit as st
 
-# ── Inject Streamlit Cloud secrets into os.environ ────────────────────────────
-# Must happen before any app imports so pydantic-settings picks them up.
-for _key, _val in st.secrets.items():
-    if isinstance(_val, str):
-        os.environ.setdefault(_key.upper(), _val)
+from app.streamlit_env import load_streamlit_secrets_into_env
+
+# Inject Streamlit Cloud secrets if available; fall back to local `.env`.
+load_streamlit_secrets_into_env()
 
 # Allow nested event loops — required for asyncio.run() inside Streamlit Cloud
 nest_asyncio.apply()

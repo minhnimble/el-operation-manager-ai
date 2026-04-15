@@ -1,0 +1,28 @@
+"""
+Helpers for loading Streamlit secrets into environment variables.
+
+Local development can rely on `.env` without a `.streamlit/secrets.toml`.
+On Streamlit Cloud, `st.secrets` is available and should override missing envs.
+"""
+
+from __future__ import annotations
+
+import os
+
+import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
+
+
+def load_streamlit_secrets_into_env() -> None:
+    """
+    Copy string values from st.secrets into os.environ if present.
+
+    If secrets.toml is missing (common locally), silently fall back to `.env`.
+    """
+    try:
+        for key, value in st.secrets.items():
+            if isinstance(value, str):
+                os.environ.setdefault(key.upper(), value)
+    except StreamlitSecretNotFoundError:
+        # Local run without .streamlit/secrets.toml; pydantic-settings uses .env.
+        return

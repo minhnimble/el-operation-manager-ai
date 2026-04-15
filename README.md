@@ -108,6 +108,57 @@ No worker process needed — all syncs run inline in the Streamlit session.
 
 ---
 
+## Local vs Streamlit Cloud Config
+
+### Local development
+
+- Config source: `.env` (auto-loaded by `pydantic-settings` in `app/config.py`)
+- `secrets.toml` is optional locally
+- Recommended `APP_BASE_URL`:
+
+```env
+APP_BASE_URL=https://localhost:8501
+```
+
+- Run Streamlit with HTTPS when testing OAuth redirects:
+
+```bash
+streamlit run streamlit_app.py \
+  --server.port 8501 \
+  --server.address localhost \
+  --server.sslCertFile .certs/localhost.pem \
+  --server.sslKeyFile .certs/localhost-key.pem
+```
+
+- Local OAuth redirect URL (Slack + GitHub):
+
+```
+https://localhost:8501
+```
+
+### Streamlit Cloud
+
+- Config source: `st.secrets` (App Settings -> Secrets)
+- Keep production values in secrets, not in repo `.env`
+- Set `APP_BASE_URL` to your deployed app URL, for example:
+
+```toml
+APP_BASE_URL = "https://yourapp.streamlit.app"
+```
+
+- Cloud OAuth redirect URL (Slack + GitHub):
+
+```
+https://yourapp.streamlit.app
+```
+
+### Fallback behavior in this app
+
+- If `st.secrets` exists, values are copied into env vars at runtime
+- If `st.secrets` is missing (common locally), app falls back cleanly to `.env`
+
+---
+
 ## Slack App Setup
 
 This app uses **Sign in with Slack** — no bot, no event subscriptions, no webhooks. The EM authorizes once and their user token is used to pull channel history on demand.

@@ -11,12 +11,11 @@ connect their own GitHub account.
 """
 
 import asyncio
-import os
 import streamlit as st
 
-for _key, _val in st.secrets.items():
-    if isinstance(_val, str):
-        os.environ.setdefault(_key.upper(), _val)
+from app.streamlit_env import load_streamlit_secrets_into_env
+
+load_streamlit_secrets_into_env()
 
 from sqlalchemy import select, delete
 
