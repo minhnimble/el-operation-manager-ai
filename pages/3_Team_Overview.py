@@ -121,7 +121,11 @@ async def _get_workspace_users(slack_user_id: str, slack_team_id: str) -> list[d
     async with AsyncSessionLocal() as db:
         ingester = await get_slack_ingester(db, slack_user_id, slack_team_id)
         if not ingester:
-            return []
+            raise RuntimeError(
+                f"No Slack token found in the database for "
+                f"user_id={slack_user_id!r} team_id={slack_team_id!r}. "
+                f"Try disconnecting and reconnecting Slack on the Connect Accounts page."
+            )
         try:
             users = await list_workspace_users(ingester)
         finally:
@@ -304,7 +308,7 @@ with st.expander("Browse workspace users", expanded=len(team_members) == 0):
         with st.expander("Full traceback"):
             st.code(tb, language="text")
     elif "_ws_users" in st.session_state:
-        st.warning("No users returned. Your Slack token may be missing the `users:read` scope — try reconnecting Slack.")
+        st.warning("Slack returned 0 users. This is unexpected — the workspace may have no visible members.")
 
 st.markdown("---")
 
