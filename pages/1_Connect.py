@@ -31,31 +31,37 @@ def run(coro):
 
 
 def _oauth_button(label: str, url: str, primary: bool = True) -> None:
-    """Render an OAuth redirect button that navigates in the same browser tab.
+    """Render an OAuth redirect button that navigates the top-level browser window.
 
-    st.link_button always opens a new tab which creates a duplicate tab after
-    the OAuth callback returns.  Using a plain <a target="_self"> avoids that.
+    st.link_button always opens a new tab.  st.markdown anchor tags are subject
+    to Streamlit's iframe sandbox which can block even target="_top" on some
+    browsers.  Using components.html + window.top.location.href bypasses both:
+    the script runs in a same-origin component iframe so window.top is accessible,
+    and the navigation targets the real browser tab — Slack/GitHub never get
+    embedded in any iframe.
     """
-    if primary:
-        bg, fg, border = "#ff4b4b", "#ffffff", "#ff4b4b"   # Streamlit red primary
-    else:
-        bg, fg, border = "transparent", "#31333f", "#d0d0d0"  # secondary style
+    import json
+    import streamlit.components.v1 as components
 
-    st.markdown(
-        f"""<a href="{url}" target="_top" style="
-            display:inline-block;
-            padding:0.4rem 1.1rem;
-            background:{bg};
-            color:{fg};
-            border:1px solid {border};
-            border-radius:0.4rem;
-            font-size:0.95rem;
-            font-weight:500;
-            text-decoration:none;
-            cursor:pointer;
-            line-height:1.6;
-        ">{label}</a>""",
-        unsafe_allow_html=True,
+    js_url = json.dumps(url)   # safe JS string — handles & ? = etc.
+    bg     = "#ff4b4b" if primary else "transparent"
+    fg     = "#ffffff" if primary else "#31333f"
+    border = "#ff4b4b" if primary else "#d0d0d0"
+
+    components.html(
+        f"""
+        <div style="margin:2px 0 6px 0;">
+          <button
+            onclick="window.top.location.href={js_url}"
+            style="background:{bg};color:{fg};border:1px solid {border};
+                   border-radius:6px;padding:6px 18px;font-size:14px;
+                   font-weight:500;cursor:pointer;font-family:sans-serif;
+                   line-height:1.5;">
+            {label}
+          </button>
+        </div>
+        """,
+        height=48,
     )
 
 
