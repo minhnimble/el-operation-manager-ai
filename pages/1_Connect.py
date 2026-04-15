@@ -16,6 +16,7 @@ for _key, _val in st.secrets.items():
         os.environ.setdefault(_key.upper(), _val)
 from sqlalchemy import select
 
+from sqlalchemy import delete
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.models.slack_token import SlackUserToken
@@ -28,6 +29,28 @@ settings = get_settings()
 
 def run(coro):
     return asyncio.run(coro)
+
+
+async def _disconnect_slack(slack_user_id: str, slack_team_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            delete(SlackUserToken).where(
+                SlackUserToken.slack_user_id == slack_user_id,
+                SlackUserToken.slack_team_id == slack_team_id,
+            )
+        )
+        await db.commit()
+
+
+async def _disconnect_github(slack_user_id: str, slack_team_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            delete(UserGitHubLink).where(
+                UserGitHubLink.slack_user_id == slack_user_id,
+                UserGitHubLink.slack_team_id == slack_team_id,
+            )
+        )
+        await db.commit()
 
 
 async def _get_connection_status(slack_user_id: str, slack_team_id: str) -> dict:
@@ -68,7 +91,17 @@ slack_user_id = st.session_state.get("slack_user_id")
 slack_team_id = st.session_state.get("slack_team_id")
 
 if slack_user_id:
-    st.success(f"✅ Connected as **{st.session_state.get('slack_display_name', slack_user_id)}**")
+    col1, col2 = st.columns([4, 1])
+    col1.success(f"✅ Connected as **{st.session_state.get('slack_display_name', slack_user_id)}**")
+    if col2.button("Disconnect", key="disconnect_slack"):
+        run(_disconnect_slack(slack_user_id, slack_team_id))
+        for key in ("slack_user_id", "slack_team_id", "slack_display_name"):
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    state = secrets.token_urlsafe(12)
+    slack_auth_url = build_auth_url(state=state)
+    st.link_button("Reconnect Slack (refresh token / scopes)", slack_auth_url, use_container_width=False)
 else:
     st.info("Sign in with Slack to allow the app to read your channel messages.")
     state = secrets.token_urlsafe(12)
@@ -87,17 +120,21 @@ else:
     status = run(_get_connection_status(slack_user_id, slack_team_id))
 
     if status["github_connected"]:
-        st.success(f"✅ Connected as **@{status['github_login']}**")
-        if st.button("Reconnect GitHub"):
-            github_state = f"github:{slack_team_id}:{slack_user_id}"
-            github_url = (
-                f"https://github.com/login/oauth/authorize"
-                f"?client_id={settings.github_client_id}"
-                f"&scope=read:user,repo"
-                f"&state={github_state}"
-                f"&redirect_uri={settings.app_base_url}"
-            )
-            st.link_button("Reconnect GitHub", github_url)
+        col1, col2 = st.columns([4, 1])
+        col1.success(f"✅ Connected as **@{status['github_login']}**")
+        if col2.button("Disconnect", key="disconnect_github"):
+            run(_disconnect_github(slack_user_id, slack_team_id))
+            st.rerun()
+
+        github_state = f"github:{slack_team_id}:{slack_user_id}"
+        github_url = (
+            f"https://github.com/login/oauth/authorize"
+            f"?client_id={settings.github_client_id}"
+            f"&scope=read:user,repo"
+            f"&state={github_state}"
+            f"&redirect_uri={settings.app_base_url}"
+        )
+        st.link_button("Reconnect GitHub (refresh token / scopes)", github_url)
     else:
         st.info("Link your GitHub account to enable commit and PR tracking.")
         github_state = f"github:{slack_team_id}:{slack_user_id}"
