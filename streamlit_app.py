@@ -143,16 +143,16 @@ st.markdown("---")
 st.markdown("""
 ### What this tool does
 
-- **Captures** standup messages and channel activity from Slack
-- **Pulls** commits, PRs, reviews, and issues from GitHub
-- **Normalizes** everything into a unified activity model
-- **Classifies** work items using Claude AI
-- **Generates** structured work reports for engineering leaders
+- **Tracks your team** — add engineers to your roster; they don't need to sign in
+- **Captures Slack activity** — standups, discussions, and channel messages from every channel you're in
+- **Pulls GitHub activity** — commits, PRs, reviews, and issues via OAuth or a manually set GitHub handle
+- **Classifies work** using Claude AI — surfaces feature work, bug fixes, architecture, mentorship, and incidents from standup text
+- **Generates shareable reports** — metrics, activity feed, AI insights, and a one-click copy summary per team member
 
 ### Getting started
 
-1. Go to **Connect Accounts** and sign in with Slack
-2. Link your GitHub account
-3. Trigger a **Sync** to pull your history
-4. Open **Work Report** to generate your first report
+1. **Connect Accounts** — sign in with Slack (required); optionally link your own GitHub account
+2. **Team Overview** — add your team members; enter their GitHub handles if they haven't connected OAuth
+3. **Sync Data** — pull Slack messages and GitHub activity for yourself or a specific team member
+4. **Work Report** — generate a report for any team member, browse their activity feed, and copy a summary to share
 """)
