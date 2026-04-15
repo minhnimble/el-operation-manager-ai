@@ -49,6 +49,12 @@ _IGNORED_CHANNEL_EXACT = {
 _IGNORED_CHANNEL_SUFFIXES = ("-activity", "-corner")
 _IGNORED_CHANNEL_PREFIXES = ("ic-", "nimble")
 
+# ── Channels always included when syncing a team member ───────────────────────
+# These are synced regardless of whether the member is technically a Slack
+# member — standup bots post on their behalf without them joining the channel.
+
+_ALWAYS_INCLUDE_CHANNELS = {"daily-standup"}
+
 
 def _should_skip_channel(name: str) -> bool:
     n = name.lower()
@@ -109,12 +115,18 @@ async def _get_slack_channels(access_token: str, team_id: str) -> tuple[list[dic
 async def _filter_channels_by_member(
     access_token: str, team_id: str, channels: list[dict], user_id: str
 ) -> list[dict]:
-    """Return only channels that user_id is a member of."""
+    """Return only channels that user_id is a member of.
+
+    Channels in _ALWAYS_INCLUDE_CHANNELS are passed through unconditionally —
+    standup bots post on behalf of users who may never have joined the channel.
+    """
     ingester = SlackIngester(user_token=access_token, team_id=team_id)
     try:
         result = []
         for ch in channels:
-            if await ingester.is_member(ch["id"], user_id):
+            if ch.get("name", "").lower() in _ALWAYS_INCLUDE_CHANNELS:
+                result.append(ch)  # always include — bot posts on user's behalf
+            elif await ingester.is_member(ch["id"], user_id):
                 result.append(ch)
         return result
     finally:
@@ -138,7 +150,7 @@ async def _sync_slack_channel(
     async with AsyncSessionLocal() as db:
         ingester = SlackIngester(user_token=access_token, team_id=team_id)
         try:
-            count, unresolved = await ingester.backfill_channel(
+            result = await ingester.backfill_channel(
                 db=db,
                 channel_id=channel_id,
                 channel_name=channel_name,
@@ -146,6 +158,12 @@ async def _sync_slack_channel(
                 oldest=oldest,
                 filter_user_id=filter_user_id,
             )
+            # backfill_channel returns (count, unresolved_names); guard against
+            # any cached old version that returned just int.
+            if isinstance(result, tuple):
+                count, unresolved = result
+            else:
+                count, unresolved = int(result), []
             await db.commit()
             return count, None, unresolved
         except Exception as e:
@@ -179,7 +197,8 @@ async def _get_valid_channel_ids(
         ids: list[str] = []
         names: list[str] = []
         for ch in channels:
-            if await ingester.is_member(ch["id"], target_user_id):
+            if ch.get("name", "").lower() in _ALWAYS_INCLUDE_CHANNELS or \
+                    await ingester.is_member(ch["id"], target_user_id):
                 ids.append(ch["id"])
                 names.append(ch.get("name", ch["id"]))
         return ids, names
