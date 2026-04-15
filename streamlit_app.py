@@ -70,7 +70,9 @@ if "code" in params:
                 st.write(f"Saving to database (host: `{_db_host()}`)...")
                 async def _slack_cb():
                     async with AsyncSessionLocal() as db:
-                        return await save_slack_token(db, token_data)
+                        token = await save_slack_token(db, token_data)
+                        await db.commit()
+                        return token
 
                 token = run_async(_slack_cb())
                 st.write("✓ Account saved")
@@ -99,12 +101,14 @@ if "code" in params:
                 st.write("Exchanging OAuth code with GitHub...")
                 async def _github_cb():
                     async with AsyncSessionLocal() as db:
-                        return await link_github_to_user(
+                        link = await link_github_to_user(
                             db=db,
                             slack_user_id=slack_user_id,
                             slack_team_id=slack_team_id,
                             code=code,
                         )
+                        await db.commit()
+                        return link
 
                 link = run_async(_github_cb())
                 st.write("✓ GitHub account linked")

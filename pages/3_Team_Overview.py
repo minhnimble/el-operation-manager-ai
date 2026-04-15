@@ -305,8 +305,7 @@ with st.expander("Browse workspace users", expanded=len(team_members) == 0):
     elif "_ws_users_error" in st.session_state:
         msg, tb = st.session_state["_ws_users_error"]
         st.error(f"Failed to load workspace users: **{msg}**")
-        with st.expander("Full traceback"):
-            st.code(tb, language="text")
+        st.code(tb, language="text")
     elif "_ws_users" in st.session_state:
         st.warning("Slack returned 0 users. This is unexpected — the workspace may have no visible members.")
 
