@@ -681,29 +681,24 @@ def _render_job_ui(job: dict, state_key: str) -> None:
 
 
 # Fragments re-render only themselves — no full-page rerun, so no dim flicker.
-# We self-poll only while running, and stop the fragment loop once the job ends.
-@st.fragment
+# `run_every` polls the fragment at a fixed cadence; when no job (or job done),
+# the body returns early so polling is essentially free.
+@st.fragment(run_every="1.5s")
 def _live_slack_job_fragment() -> None:
     job = st.session_state.get("_slack_sync_job")
     if not job:
         return
     with st.container(border=True):
         _render_job_ui(job, "_slack_sync_job")
-    if job.get("running"):
-        time.sleep(1.5)
-        st.rerun(scope="fragment")
 
 
-@st.fragment
+@st.fragment(run_every="1.5s")
 def _live_github_job_fragment() -> None:
     job = st.session_state.get("_github_sync_job")
     if not job:
         return
     with st.container(border=True):
         _render_job_ui(job, "_github_sync_job")
-    if job.get("running"):
-        time.sleep(1.5)
-        st.rerun(scope="fragment")
 
 
 # ── Page ──────────────────────────────────────────────────────────────────────
