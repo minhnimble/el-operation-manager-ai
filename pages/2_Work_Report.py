@@ -90,6 +90,66 @@ async def _get_team_options(
     return options
 
 
+async def _load_user_map(slack_team_id: str) -> dict[str, str]:
+    """Return {slack_user_id: display_name} for all known users in the team.
+
+    Merges TeamMember and User tables so both managed members and signed-in
+    users are resolvable.  Used to replace <@USER_ID> mentions in message text.
+    """
+    from app.models.team_member import TeamMember
+    id_to_name: dict[str, str] = {}
+    async with AsyncSessionLocal() as db:
+        tm_rows = await db.execute(
+            select(TeamMember.member_slack_user_id, TeamMember.member_display_name).where(
+                TeamMember.member_slack_team_id == slack_team_id,
+            )
+        )
+        for uid, name in tm_rows.all():
+            if uid and name:
+                id_to_name[uid] = name
+
+        u_rows = await db.execute(
+            select(User.slack_user_id, User.slack_display_name, User.slack_real_name).where(
+                User.slack_team_id == slack_team_id,
+            )
+        )
+        for uid, display, real in u_rows.all():
+            if uid and uid not in id_to_name:
+                id_to_name[uid] = display or real or uid
+    return id_to_name
+
+
+def _format_slack_text(text: str, user_map: dict[str, str]) -> str:
+    """Convert Slack mrkdwn codes in message body to readable markdown.
+
+    Handles:
+      <@USER_ID>            → @display_name  (or @USER_ID if unknown)
+      <#CHANNEL_ID|name>    → #name
+      <#CHANNEL_ID>         → #CHANNEL_ID
+      <URL|link text>       → [link text](URL)
+      <URL>                 → URL (bare link)
+    """
+    import re
+
+    # User mentions
+    def _replace_user(m: re.Match) -> str:
+        uid = m.group(1)
+        return f"@{user_map.get(uid, uid)}"
+    text = re.sub(r"<@([A-Z0-9]+)>", _replace_user, text)
+
+    # Channel references  <#C123|name> or <#C123>
+    text = re.sub(r"<#[A-Z0-9]+\|([^>]+)>", r"#\1", text)
+    text = re.sub(r"<#([A-Z0-9]+)>", r"#\1", text)
+
+    # Links with display text  <https://...|text>
+    text = re.sub(r"<(https?://[^|>]+)\|([^>]+)>", r"[\2](\1)", text)
+
+    # Bare links  <https://...>
+    text = re.sub(r"<(https?://[^>]+)>", r"\1", text)
+
+    return text
+
+
 async def _get_report(slack_user_id, slack_team_id, start, end, include_ai) -> WorkReport:
     async with AsyncSessionLocal() as db:
         return await build_work_report(
@@ -172,6 +232,9 @@ if not report:
     st.stop()
 
 # ─── Display ──────────────────────────────────────────────────────────────────
+
+# Load user map once for resolving <@USER_ID> mentions in message text
+_user_map: dict[str, str] = run(_load_user_map(slack_team_id))
 
 st.subheader(f"Report: {report.user_display_name}")
 st.caption(f"Period: {report.date_range}")
@@ -288,11 +351,13 @@ with st.expander(f"Standups ({len(standups)})", expanded=len(standups) > 0):
         st.info("No standup messages in this period.")
     else:
         for item in standups:
-            ts   = item["timestamp"]
-            body = item["body"] or item["title"] or "(empty)"
-            ch   = f"#{item['slack_channel_id']}" if item["slack_channel_id"] else ""
+            ts      = item["timestamp"]
+            raw     = item["body"] or item["title"] or "(empty)"
+            body    = _format_standup_body(_format_slack_text(raw, _user_map))
+            ch_name = item.get("channel_name") or item.get("slack_channel_id") or ""
+            ch      = f"#{ch_name}" if ch_name else ""
             st.markdown(f"**{ts}** {ch}")
-            st.markdown(_format_standup_body(body))
+            st.markdown(body)
             st.divider()
 
 with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
@@ -338,7 +403,8 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
             for item in _msgs:
                 icon = _SLACK_ICONS.get(item["type"], "💬")
                 ts   = item["timestamp"]
-                body = item["body"] or item["title"] or "(empty)"
+                raw  = item["body"] or item["title"] or "(empty)"
+                body = _format_slack_text(raw, _user_map)
 
                 col_icon, col_body, col_ts = st.columns([0.3, 5, 1.5])
                 col_icon.markdown(icon)
