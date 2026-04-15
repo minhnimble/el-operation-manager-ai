@@ -146,13 +146,17 @@ st.markdown("""
 - **Tracks your team** — add engineers to your roster; they don't need to sign in
 - **Captures Slack activity** — standups, discussions, and channel messages from every channel you're in
 - **Pulls GitHub activity** — commits, PRs, reviews, and issues via OAuth or a manually set GitHub handle
+- **Batch sync** — sync yourself, your entire team, or any subset of members in one go with per-member progress tracking
+- **Flexible date ranges** — sync any window (last N days or a custom date range); default is 3 months
+- **Background sync** — sync runs in the background so you can freely switch pages without losing progress
 - **Classifies work** using Claude AI — surfaces feature work, bug fixes, architecture, mentorship, and incidents from standup text
 - **Generates shareable reports** — metrics, activity feed, AI insights, and a one-click copy summary per team member
+- **Database cleanup tools** — remove data from ignored channels across all users, or clear stale data for removed team members
 
 ### Getting started
 
 1. **Connect Accounts** — sign in with Slack (required); optionally link your own GitHub account
 2. **Team Overview** — add your team members; enter their GitHub handles if they haven't connected OAuth
-3. **Sync Data** — pull Slack messages and GitHub activity for yourself or a specific team member
+3. **Sync Data** — select one or more members (or your whole team at once), pick a date range, and kick off a background sync for Slack and/or GitHub
 4. **Work Report** — generate a report for any team member, browse their activity feed, and copy a summary to share
 """)

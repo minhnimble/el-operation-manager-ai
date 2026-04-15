@@ -15,6 +15,11 @@ Built for Engineering Managers, Tech Leads, and CTOs who want to reduce manual s
 - Pulls commits, PRs, reviews, and issues from GitHub
 - Normalizes everything into a unified `WorkUnit` model
 - **Team management** — EM adds team members from the workspace; syncs are scoped to channels the member is actually in
+- **Batch sync** — sync yourself, your whole team, or any subset of members at once with per-member progress chips
+- **Flexible date ranges** — choose "Last N days" or a fully custom date range; default backfill window is 3 months
+- **Background sync** — sync runs in a daemon thread so you can switch pages freely without losing progress; the live log and progress bar persist across navigation
+- **Slack rate-limit handling** — automatic `Retry-After` back-off with up to 6 retries; inter-page delays keep the app well within Slack's tier limits
+- **Database cleanup tools** — remove stored messages from ignored channels across all users (no API calls needed), or clear stale raw data for removed team members
 - Generates structured work reports per member with activity feed and a one-click copyable summary
 - Uses Claude AI to classify work items and produce leadership insights
 
@@ -31,7 +36,7 @@ Built for Engineering Managers, Tech Leads, and CTOs who want to reduce manual s
 | AI | Anthropic Claude API |
 | Migrations | Alembic |
 
-> **No Redis or Celery required.** Syncs run directly in the Streamlit session and work on Streamlit Cloud out of the box.
+> **No Redis or Celery required.** Syncs run in lightweight daemon threads within the Streamlit process and work on Streamlit Cloud out of the box.
 
 ---
 
@@ -107,7 +112,7 @@ make dev
 # opens at http://localhost:8501
 ```
 
-No worker process needed — all syncs run inline in the Streamlit session.
+No worker process needed — syncs run in background daemon threads within the Streamlit process.
 For OAuth testing, use the HTTPS run command in **Local vs Streamlit Cloud Config**.
 
 ---
@@ -322,7 +327,18 @@ Optionally supply each member's GitHub handle. If they later connect their own G
 
 ### 3. Sync Data
 
-Go to **🔄 Sync Data**, select a team member (or yourself), set the backfill window, and click **Sync Slack** or **Sync GitHub**.
+Go to **🔄 Sync Data**, pick one or more members using the quick-select buttons (**All**, **My Team**, **Clear**) or by typing names, set the date range, and click **Sync Slack** or **Sync GitHub**.
+
+**Member selection**
+- **All** — includes yourself and all team members
+- **My Team** — team members only (excludes yourself)
+- Individual multi-select — choose any combination
+
+**Date range**
+- *Last N days* — quick presets (7 / 30 / 60 / 90 / 180 days); default is **90 days**
+- *Custom range* — pick exact start and end dates
+
+**Background sync** — after clicking Sync the job runs in the background. You can freely switch to other pages (Work Report, Team Overview, etc.) and come back; the progress bar and live log will still be there.
 
 **How Slack sync works:**
 
@@ -339,7 +355,11 @@ Go to **🔄 Sync Data**, select a team member (or yourself), set the backfill w
 - Channels with `ic-` prefix
 - Exact: `access-requests`, `vn-community`, `cat-place`, `hardware-and-machinery`
 
-Progress is shown per channel and per GitHub repo with a live log and progress bar.
+Progress is shown per member, per channel, and per GitHub repo with a live log and progress bar.
+
+**Database cleanup** (bottom of the Sync page, independent of member/date selection):
+- *Remove ignored channels* — scans the database for messages in ignored channels and deletes them for all users at once (no API calls)
+- *Remove stale member data* — deletes raw Slack/GitHub data for a specific team member who has been removed from the roster
 
 ### 4. Generate a Work Report
 

@@ -14,6 +14,8 @@ connected their own GitHub account via OAuth for the sync to work.
 
 import asyncio
 from datetime import date, time as dt_time
+import threading
+import time
 import streamlit as st
 
 from app.streamlit_env import load_streamlit_secrets_into_env
@@ -425,6 +427,259 @@ async def _normalize_github(team_id: str) -> int:
         return count
 
 
+# ── Background sync job helpers ───────────────────────────────────────────────
+
+def _make_job(label: str) -> dict:
+    return {
+        "label": label,
+        "running": True,
+        "log": [],               # list of (level, msg); level: "info"|"warn"|"error"|"ok"
+        "progress": 0,
+        "progress_text": "Starting…",
+        "member_statuses": [],   # list of {name, status, detail}
+        "summary": "",
+    }
+
+
+def _jlog(job: dict, msg: str, level: str = "info") -> None:
+    """Thread-safe log append (CPython list.append is atomic under the GIL)."""
+    job["log"].append((level, msg))
+
+
+def _run_slack_sync_bg(
+    job: dict,
+    access_token: str,
+    slack_user_id: str,
+    slack_team_id: str,
+    target_users: list,
+    oldest: "datetime",
+    latest: "datetime | None",
+    slack_sync_mode: str,
+) -> None:
+    """Runs in a daemon thread — updates `job` dict with live progress."""
+
+    def _run(coro):
+        return asyncio.run(coro)
+
+    try:
+        grand_msgs = 0
+        all_errors: list[str] = []
+
+        base_channels: list[dict] = []
+        if slack_sync_mode == "normal":
+            _jlog(job, "📋 Loading joined channels…")
+            try:
+                all_channels, warnings = _run(_get_slack_channels(access_token, slack_team_id))
+                for w in warnings:
+                    _jlog(job, f"⚠️ {w}", "warn")
+                base_channels = [
+                    ch for ch in all_channels
+                    if not _should_skip_channel(ch.get("name", ""))
+                    and ch.get("name", "").lower() not in _ALWAYS_INCLUDE_CHANNELS
+                ]
+                _jlog(job, f"→ {len(base_channels)} channel(s) to sync.")
+            except Exception as e:
+                _jlog(job, f"❌ Failed to load channels: {e}", "error")
+                job["summary"] = f"❌ Failed: {e}"
+                return
+
+        for idx, (member_name, target_user_id) in enumerate(target_users):
+            is_self_m = target_user_id == slack_user_id
+            job["progress"] = int(idx / len(target_users) * 94)
+            job["progress_text"] = f"Member {idx + 1}/{len(target_users)}: {member_name}…"
+
+            ms: dict = {"name": member_name, "status": "⏳", "detail": ""}
+            job["member_statuses"].append(ms)
+            _jlog(job, f"\n👤 **{member_name}**")
+
+            total_msgs = 0
+            member_errors: list[str] = []
+
+            try:
+                if slack_sync_mode == "standup":
+                    _jlog(job, "  📋 Looking up standup channel(s)…")
+                    channels = _run(_get_standup_channels(access_token, slack_team_id))
+                    _jlog(job, f"  → {len(channels)} channel(s).")
+                else:
+                    if is_self_m:
+                        channels = base_channels
+                        _jlog(job, f"  Using {len(channels)} channel(s).")
+                    else:
+                        _jlog(job, f"  Filtering channels for {member_name}…")
+                        channels = _run(_filter_channels_by_member(
+                            access_token, slack_team_id, base_channels, target_user_id
+                        ))
+                        _jlog(job, f"  → {len(channels)} channel(s).")
+
+                for ch in channels:
+                    ch_id   = ch["id"]
+                    ch_name = ch.get("name", ch_id)
+                    _jlog(job, f"  📥 #{ch_name}")
+                    mf = None if is_self_m else target_user_id
+                    count, err, unresolved = _run(_sync_slack_channel(
+                        access_token, slack_team_id, slack_user_id,
+                        ch_id, ch_name, oldest, latest=latest,
+                        filter_user_id=mf,
+                    ))
+                    if err:
+                        member_errors.append(f"#{ch_name}: {err}")
+                        _jlog(job, f"    ⚠️ {err}", "warn")
+                    else:
+                        total_msgs += count
+                        if count:
+                            _jlog(job, f"    ✓ {count} new message(s)")
+                        if unresolved:
+                            _jlog(job, f"    ⚠️ Unmatched: {', '.join(unresolved)}", "warn")
+
+                grand_msgs += total_msgs
+                all_errors.extend(member_errors)
+                ms["status"] = "✅" if not member_errors else "⚠️"
+                ms["detail"] = f"{total_msgs} msgs" + (f" · {len(member_errors)} err" if member_errors else "")
+
+            except Exception as e:
+                member_errors.append(str(e))
+                ms["status"] = "❌"
+                ms["detail"] = str(e)[:60]
+                _jlog(job, f"  ❌ {e}", "error")
+
+        job["progress"] = 96
+        job["progress_text"] = "Normalizing work units…"
+        _jlog(job, "\n🔄 Normalizing work units…")
+        normalized = _run(_normalize_slack(slack_team_id))
+        _jlog(job, f"  ✓ {normalized} work unit(s)")
+
+        job["progress"] = 100
+        job["progress_text"] = "Done ✓"
+        mode_label = "normal messages" if slack_sync_mode == "normal" else "daily standup"
+        job["summary"] = (
+            f"✅ Slack sync complete ({mode_label}) — "
+            f"**{grand_msgs}** new message(s), **{normalized}** work unit(s) "
+            f"across **{len(target_users)}** member(s)"
+            + (f" · {len(all_errors)} error(s)" if all_errors else "")
+        )
+        _jlog(job, job["summary"], "ok")
+
+    except Exception as e:
+        job["summary"] = f"❌ Slack sync failed: {e}"
+        _jlog(job, job["summary"], "error")
+    finally:
+        job["running"] = False
+
+
+def _run_github_sync_bg(
+    job: dict,
+    slack_team_id: str,
+    members_with_gh: list,
+    gh_info: dict,
+    since: "datetime",
+) -> None:
+    """Runs in a daemon thread — updates `job` dict with live progress."""
+
+    def _run(coro):
+        return asyncio.run(coro)
+
+    try:
+        grand: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
+
+        for idx, (member_name, target_user_id) in enumerate(members_with_gh):
+            gh_login_d = gh_info[member_name][1]
+            job["progress"] = int(idx / len(members_with_gh) * 94)
+            job["progress_text"] = f"Member {idx + 1}/{len(members_with_gh)}: {member_name}…"
+
+            ms: dict = {"name": member_name, "status": "⏳", "detail": ""}
+            job["member_statuses"].append(ms)
+            _jlog(job, f"\n👤 **{member_name}** (@{gh_login_d})")
+
+            try:
+                gh_token, github_login = _run(_get_github_credentials(target_user_id, slack_team_id))
+                _jlog(job, f"  📋 Loading repos for @{github_login}…")
+                repos = _run(_get_github_repos(gh_token, github_login))
+                _jlog(job, f"  Found {len(repos)} repo(s).")
+
+                tc: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
+                for repo in repos:
+                    repo_name = repo["full_name"]
+                    _jlog(job, f"  📦 {repo_name}")
+                    try:
+                        counts = _run(_sync_github_repo(
+                            gh_token, github_login, slack_team_id,
+                            target_user_id, repo, since,
+                        ))
+                        added = sum(counts.values())
+                        if added:
+                            parts = ", ".join(f"{v} {k}" for k, v in counts.items() if v)
+                            _jlog(job, f"    ✓ {parts}")
+                        for k, v in counts.items():
+                            tc[k]     = tc.get(k, 0) + v
+                            grand[k]  = grand.get(k, 0) + v
+                    except Exception as e:
+                        _jlog(job, f"    ⚠️ {e}", "warn")
+
+                member_summary = ", ".join(f"{v} {k}" for k, v in tc.items() if v) or "nothing new"
+                ms["status"] = "✅"
+                ms["detail"] = member_summary
+                _jlog(job, f"  → {member_summary}")
+
+            except Exception as e:
+                ms["status"] = "❌"
+                ms["detail"] = str(e)[:60]
+                _jlog(job, f"  ❌ {e}", "error")
+
+        job["progress"] = 96
+        job["progress_text"] = "Normalizing…"
+        _jlog(job, "\n🔄 Normalizing GitHub activity…")
+        normalized = _run(_normalize_github(slack_team_id))
+        _jlog(job, f"  ✓ {normalized} work unit(s)")
+
+        job["progress"] = 100
+        job["progress_text"] = "Done ✓"
+        grand_summary = ", ".join(f"{v} {k}" for k, v in grand.items() if v) or "nothing new"
+        job["summary"] = (
+            f"✅ GitHub sync complete — {grand_summary}, **{normalized}** work unit(s) "
+            f"across **{len(members_with_gh)}** member(s)"
+        )
+        _jlog(job, job["summary"], "ok")
+
+    except Exception as e:
+        job["summary"] = f"❌ GitHub sync failed: {e}"
+        _jlog(job, job["summary"], "error")
+    finally:
+        job["running"] = False
+
+
+def _render_job_ui(job: dict, state_key: str) -> None:
+    """Render live/completed job progress. Auto-reruns the page while running."""
+    st.progress(job["progress"], text=job["progress_text"])
+
+    # Member status chips
+    statuses = job["member_statuses"]
+    if statuses:
+        cols = st.columns(min(len(statuses), 5))
+        for i, ms in enumerate(statuses):
+            cols[i % 5].caption(f"{ms['status']} **{ms['name']}**  \n{ms['detail']}")
+
+    # Scrollable log — use a text_area so it doesn't explode into hundreds of st.write rows
+    log_lines = [msg for _, msg in job["log"]]
+    st.text_area(
+        "Log",
+        value="\n".join(log_lines),
+        height=280,
+        disabled=True,
+        label_visibility="collapsed",
+        key=f"_log_area_{state_key}_{len(log_lines)}",
+    )
+
+    if not job["running"]:
+        summary = job.get("summary", "")
+        if "✅" in summary:
+            st.success(summary)
+        elif summary:
+            st.error(summary)
+        if st.button("Clear", key=f"_clear_{state_key}"):
+            st.session_state.pop(state_key, None)
+            st.rerun()
+
+
 # ── Page ──────────────────────────────────────────────────────────────────────
 
 st.title("🔄 Sync Data")
@@ -567,152 +822,31 @@ with _slack_btn_col2:
 
 if sync_normal_clicked or sync_standup_clicked:
     slack_sync_mode = "normal" if sync_normal_clicked else "standup"
-    oldest = sync_start
-    grand_total_msgs = 0
-    all_slack_errors: list[str] = []
-
-    overall_slack_progress = st.progress(
-        0, text=f"Starting Slack {slack_sync_mode} sync for {len(target_users)} member(s)…"
-    )
-
-    # ── Fetch token once ──────────────────────────────────────────────────────
+    # Fetch token in main thread (fast DB lookup — needed before thread starts)
     try:
         access_token = run(_get_slack_token(slack_user_id, slack_team_id))
     except Exception as e:
-        overall_slack_progress.empty()
         st.error(str(e))
         st.stop()
+    job = _make_job("Slack")
+    st.session_state["_slack_sync_job"] = job
+    threading.Thread(
+        target=_run_slack_sync_bg,
+        args=(job, access_token, slack_user_id, slack_team_id,
+              target_users, sync_start, sync_end, slack_sync_mode),
+        daemon=True,
+    ).start()
+    st.rerun()
 
-    # ── For normal sync: discover channels once, reuse per member ─────────────
-    base_channels: list[dict] = []
-    if slack_sync_mode == "normal":
-        try:
-            with st.spinner("Loading joined channels…"):
-                all_channels, ch_warnings = run(_get_slack_channels(access_token, slack_team_id))
-            for w in ch_warnings:
-                st.warning(w)
-            base_channels = [
-                ch for ch in all_channels
-                if not _should_skip_channel(ch.get("name", ""))
-                and ch.get("name", "").lower() not in _ALWAYS_INCLUDE_CHANNELS
-            ]
-            total_ch  = len(all_channels)
-            standup_ch = sum(
-                1 for c in all_channels
-                if c.get("name", "").lower() in _ALWAYS_INCLUDE_CHANNELS
-            )
-            skipped_ch = total_ch - len(base_channels) - standup_ch
-            st.caption(
-                f"Found **{total_ch}** joined channel(s) → "
-                f"**{len(base_channels)}** to sync"
-                + (f" ({skipped_ch} ignored)" if skipped_ch else "") + "."
-            )
-        except Exception as e:
-            overall_slack_progress.empty()
-            st.error(str(e))
-            st.stop()
+# Show live / last-run progress for Slack (persists across page navigations)
+if "_slack_sync_job" in st.session_state:
+    with st.container(border=True):
+        _render_job_ui(st.session_state["_slack_sync_job"], "_slack_sync_job")
 
-    # ── Per-member sync loop ───────────────────────────────────────────────────
-    for member_idx, (member_name, target_user_id) in enumerate(target_users):
-        is_self_member = target_user_id == slack_user_id
-        overall_slack_progress.progress(
-            int(member_idx / len(target_users) * 95),
-            text=f"Member {member_idx + 1}/{len(target_users)}: {member_name}…",
-        )
-
-        total_msgs   = 0
-        member_errors: list[str] = []
-
-        with st.status(
-            f"{'👤 ' if is_batch else ''}{member_name}",
-            expanded=(member_idx == 0),
-        ) as member_status:
-            try:
-                if slack_sync_mode == "standup":
-                    st.write("📋 Looking up standup channel(s)…")
-                    channels = run(_get_standup_channels(access_token, slack_team_id))
-                    if channels:
-                        st.write("  → " + ", ".join(f"#**{c.get('name', c['id'])}**" for c in channels))
-                    else:
-                        st.warning("No standup channels found.")
-                else:
-                    if is_self_member:
-                        channels = base_channels
-                        st.write(f"Using all **{len(channels)}** channel(s).")
-                    else:
-                        st.write(f"Filtering channels for **{member_name}**…")
-                        channels = run(
-                            _filter_channels_by_member(
-                                access_token, slack_team_id, base_channels, target_user_id
-                            )
-                        )
-                        st.write(f"  → **{len(channels)}** channel(s).")
-
-                n = max(len(channels), 1)
-                ch_progress = st.progress(0, text="Starting…")
-
-                for i, ch in enumerate(channels):
-                    ch_id   = ch["id"]
-                    ch_name = ch.get("name", ch_id)
-                    ch_progress.progress(int(i / n * 90), text=f"#{ch_name} ({i + 1}/{n})")
-                    st.write(f"📥 #{ch_name}")
-
-                    member_filter = None if is_self_member else target_user_id
-                    count, err, unresolved = run(
-                        _sync_slack_channel(
-                            access_token, slack_team_id, slack_user_id,
-                            ch_id, ch_name, oldest,
-                            latest=sync_end,
-                            filter_user_id=member_filter,
-                        )
-                    )
-                    if err:
-                        member_errors.append(f"#{ch_name}: {err}")
-                        st.write(f"  ⚠️ {err}")
-                    else:
-                        total_msgs += count
-                        if count:
-                            st.write(f"  ✓ {count} new message(s)")
-                        if unresolved:
-                            st.write(
-                                "  ⚠️ Unmatched standup names: "
-                                + ", ".join(f"**{u}**" for u in unresolved)
-                            )
-
-                ch_progress.progress(100, text="Done ✓")
-
-            except Exception as e:
-                member_errors.append(str(e))
-                st.error(str(e))
-
-            grand_total_msgs  += total_msgs
-            all_slack_errors.extend(member_errors)
-
-            status_label = (
-                f"{'✅' if not member_errors else '⚠️'} {member_name} — {total_msgs} message(s)"
-                + (f" · {len(member_errors)} error(s)" if member_errors else "")
-            )
-            member_status.update(
-                label=status_label,
-                state="complete" if not member_errors else "error",
-            )
-
-    # ── Normalize once across the whole team ──────────────────────────────────
-    overall_slack_progress.progress(97, text="Normalizing work units…")
-    normalized_slack = run(_normalize_slack(slack_team_id))
-    overall_slack_progress.progress(100, text="Done ✓")
-
-    mode_label = "normal messages" if slack_sync_mode == "normal" else "daily standup"
-    st.success(
-        f"✅ Slack sync complete ({mode_label}) — "
-        f"**{grand_total_msgs}** new message(s), **{normalized_slack}** work unit(s) "
-        f"across **{len(target_users)}** member(s)"
-        + (f" · {len(all_slack_errors)} error(s)" if all_slack_errors else "")
-    )
-    if all_slack_errors:
-        with st.expander(f"{len(all_slack_errors)} error(s)"):
-            for err in all_slack_errors:
-                st.warning(err)
+# Auto-rerun every 1.5 s while Slack sync is in progress
+if st.session_state.get("_slack_sync_job", {}).get("running"):
+    time.sleep(1.5)
+    st.rerun()
 
 st.markdown("---")
 
@@ -744,80 +878,24 @@ if members_with_gh:
     st.caption(f"Will sync: {gh_list}")
 
     if st.button("Sync GitHub", type="primary"):
-        since = sync_start
-        grand_gh_counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
+        job = _make_job("GitHub")
+        st.session_state["_github_sync_job"] = job
+        threading.Thread(
+            target=_run_github_sync_bg,
+            args=(job, slack_team_id, members_with_gh, gh_info, sync_start),
+            daemon=True,
+        ).start()
+        st.rerun()
 
-        overall_gh_progress = st.progress(
-            0, text=f"Starting GitHub sync for {len(members_with_gh)} member(s)…"
-        )
+    # Show live / last-run progress for GitHub
+    if "_github_sync_job" in st.session_state:
+        with st.container(border=True):
+            _render_job_ui(st.session_state["_github_sync_job"], "_github_sync_job")
 
-        for member_idx, (member_name, target_user_id) in enumerate(members_with_gh):
-            gh_login_display = gh_info[member_name][1]
-            overall_gh_progress.progress(
-                int(member_idx / len(members_with_gh) * 95),
-                text=f"Member {member_idx + 1}/{len(members_with_gh)}: {member_name}…",
-            )
-
-            with st.status(
-                f"{'👤 ' if is_batch else ''}{member_name} (@{gh_login_display})",
-                expanded=(member_idx == 0),
-            ) as member_gh_status:
-                try:
-                    st.write("🔑 Fetching credentials…")
-                    gh_token, github_login = run(_get_github_credentials(target_user_id, slack_team_id))
-                    st.write(f"📋 Loading repos for @{github_login}…")
-                    repos = run(_get_github_repos(gh_token, github_login))
-                    st.write(f"Found **{len(repos)}** repo(s).")
-
-                    total_counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
-                    n = max(len(repos), 1)
-                    repo_progress = st.progress(0, text="Scanning repos…")
-
-                    for i, repo in enumerate(repos):
-                        repo_name = repo["full_name"]
-                        repo_progress.progress(int(i / n * 100), text=f"{repo_name} ({i + 1}/{n})")
-                        st.write(f"📦 {repo_name}")
-                        try:
-                            counts = run(
-                                _sync_github_repo(
-                                    gh_token, github_login, slack_team_id,
-                                    target_user_id, repo, since,
-                                )
-                            )
-                            added = sum(counts.values())
-                            if added:
-                                parts = ", ".join(f"{v} {k}" for k, v in counts.items() if v)
-                                st.write(f"  ✓ {parts}")
-                            for k, v in counts.items():
-                                total_counts[k]  = total_counts.get(k, 0) + v
-                                grand_gh_counts[k] = grand_gh_counts.get(k, 0) + v
-                        except Exception as e:
-                            st.write(f"  ⚠️ {e}")
-
-                    repo_progress.progress(100, text="Done ✓")
-                    member_summary = (
-                        ", ".join(f"{v} {k}" for k, v in total_counts.items() if v)
-                        or "nothing new"
-                    )
-                    member_gh_status.update(
-                        label=f"✅ {member_name} — {member_summary}", state="complete"
-                    )
-
-                except Exception as e:
-                    member_gh_status.update(label=f"❌ {member_name} — failed", state="error")
-                    st.error(str(e))
-
-        overall_gh_progress.progress(97, text="Normalizing work units…")
-        normalized_gh = run(_normalize_github(slack_team_id))
-        overall_gh_progress.progress(100, text="Done ✓")
-
-        grand_summary = (
-            ", ".join(f"{v} {k}" for k, v in grand_gh_counts.items() if v) or "nothing new"
-        )
-        st.success(
-            f"✅ GitHub sync complete — {grand_summary}, **{normalized_gh}** work unit(s) "
-            f"across **{len(members_with_gh)}** member(s)"
-        )
+    # Auto-rerun every 1.5 s while GitHub sync is in progress
+    if st.session_state.get("_github_sync_job", {}).get("running"):
+        time.sleep(1.5)
+        st.rerun()
 
 st.markdown("---")
 
