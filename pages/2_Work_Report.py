@@ -119,6 +119,54 @@ async def _load_user_map(slack_team_id: str) -> dict[str, str]:
     return id_to_name
 
 
+def _collect_unknown_user_ids(items: list[dict], known: dict[str, str]) -> set[str]:
+    """Scan message bodies for <@USER_ID> mentions not yet in the known map."""
+    import re
+    unknown: set[str] = set()
+    for item in items:
+        body = item.get("body") or item.get("title") or ""
+        for uid in re.findall(r"<@([A-Z0-9]+)>", body):
+            if uid not in known:
+                unknown.add(uid)
+    return unknown
+
+
+def _enrich_user_map(
+    user_map: dict[str, str],
+    unknown_ids: set[str],
+    access_token: str,
+) -> dict[str, str]:
+    """Fetch Slack profiles for unknown user IDs and merge into user_map.
+
+    Uses synchronous requests (same pattern as oauth.py) so it's safe to call
+    from Streamlit's sync context.  Silently skips any ID that fails to resolve.
+    """
+    import requests
+
+    enriched = dict(user_map)
+    for uid in unknown_ids:
+        try:
+            resp = requests.get(
+                "https://slack.com/api/users.info",
+                params={"user": uid},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("ok"):
+                profile = data.get("user", {}).get("profile", {})
+                name = (
+                    profile.get("display_name")
+                    or profile.get("real_name")
+                    or data["user"].get("name")
+                    or uid
+                )
+                enriched[uid] = name
+        except Exception:
+            pass  # leave ID as-is if lookup fails
+    return enriched
+
+
 def _format_slack_text(text: str, user_map: dict[str, str]) -> str:
     """Convert Slack mrkdwn codes in message body to readable markdown.
 
@@ -233,8 +281,31 @@ if not report:
 
 # ─── Display ──────────────────────────────────────────────────────────────────
 
-# Load user map once for resolving <@USER_ID> mentions in message text
+# Load user map: start from DB, then enrich unknown IDs via Slack API
 _user_map: dict[str, str] = run(_load_user_map(slack_team_id))
+
+_all_slack_msgs = [a for a in report.recent_activity if a.get("source") == "slack"]
+_unknown_ids = _collect_unknown_user_ids(_all_slack_msgs, _user_map)
+if _unknown_ids:
+    try:
+        from app.models.slack_token import SlackUserToken
+
+        async def _get_slack_token_for_report() -> str | None:
+            async with AsyncSessionLocal() as _db:
+                _r = await _db.execute(
+                    select(SlackUserToken).where(
+                        SlackUserToken.slack_user_id == slack_user_id,
+                        SlackUserToken.slack_team_id == slack_team_id,
+                    )
+                )
+                _rec = _r.scalar_one_or_none()
+                return _rec.access_token if _rec else None
+
+        _slack_token = run(_get_slack_token_for_report())
+        if _slack_token:
+            _user_map = _enrich_user_map(_user_map, _unknown_ids, _slack_token)
+    except Exception:
+        pass  # enrichment is best-effort; falls back to raw ID on any error
 
 st.subheader(f"Report: {report.user_display_name}")
 st.caption(f"Period: {report.date_range}")
