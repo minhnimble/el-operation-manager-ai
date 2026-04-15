@@ -1,63 +1,45 @@
-from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 
 settings = get_settings()
 
+# ── Connection pool strategy ───────────────────────────────────────────────────
+#
+# Streamlit Cloud is a serverless-style environment: each page run is short-
+# lived, there is no persistent process that benefits from a warm pool, and
+# Supabase's Transaction Pooler (PgBouncer, pool_mode=transaction) already
+# does the real pooling on its side.
+#
+# Using NullPool means SQLAlchemy opens a fresh asyncpg connection for every
+# AsyncSessionLocal() context and closes it immediately on exit.  This has
+# several advantages over a conventional pool in this environment:
+#
+#   • No stale connections — PgBouncer aggressively drops idle server-side
+#     connections; a SQLAlchemy pool would hand out those dead connections
+#     and produce InterfaceError on the first query.
+#
+#   • No DuplicatePreparedStatementError — named server-side prepared
+#     statements only conflict when the same physical server connection is
+#     reused by different clients.  With NullPool every session gets a brand-
+#     new connection, so there is nothing to conflict with.
+#
+#   • No cross-event-loop issues — Streamlit reruns pages in the same process
+#     but different asyncio tasks; pooled asyncpg connections are tied to the
+#     loop that created them and can raise errors when reused across tasks.
+#
+# statement_cache_size=0 is kept as a belt-and-suspenders measure: it tells
+# asyncpg not to maintain its own client-side prepared-statement LRU cache,
+# so even if a connection is somehow reused it will not attempt to reuse a
+# cached handle that no longer exists on the server.
 engine = create_async_engine(
     settings.database_url,
-    pool_size=settings.database_pool_size,
-    max_overflow=5,
+    poolclass=NullPool,
     echo=not settings.is_production,
-    # asyncpg-level: disable client-side prepared statement LRU cache.
     connect_args={"statement_cache_size": 0},
 )
-
-
-# ── PgBouncer / Supabase Transaction Pooler compatibility ─────────────────────
-#
-# The Transaction Pooler routes each transaction to an arbitrary server
-# connection.  Named server-side prepared statements persist on that
-# connection and cause DuplicatePreparedStatementError when PgBouncer
-# hands the same connection to another client that tries the same name.
-#
-# AsyncAdapt_asyncpg_connection uses __slots__, so we cannot add new
-# attributes — we can only overwrite the ones that already exist as slots.
-# Two slots control prepared-statement behaviour:
-#
-#   _prepared_statement_name_func  → lambda: None
-#       SQLAlchemy calls this to get the name for each server-side prepared
-#       statement.  Returning None makes asyncpg use an *unnamed* prepared
-#       statement (""), which PostgreSQL silently overwrites on each use
-#       instead of raising a duplicate-name error.
-#
-#   _prepared_statement_cache  → _NeverCache() (no-op dict)
-#       SQLAlchemy caches PreparedStatement objects by SQL text.  With unnamed
-#       statements a cached handle from a previous connection is invalid on the
-#       next (PgBouncer may have routed us to a different server connection
-#       with no prepared statement at all).  Replacing the cache with a dict
-#       that never stores anything forces a fresh prepare() on every query,
-#       which is safe and avoids stale-handle errors.
-
-
-class _NeverCache(dict):
-    """Drop-in dict replacement that never stores entries.
-
-    Every lookup misses, so SQLAlchemy always calls asyncpg.prepare() fresh
-    rather than reusing a cached PreparedStatement that may no longer exist
-    on the current server connection.
-    """
-    def __setitem__(self, key, value):
-        pass  # intentionally discard — never cache
-
-
-@event.listens_for(engine.sync_engine, "connect")
-def _patch_asyncpg_for_pgbouncer(dbapi_connection, _connection_record):
-    dbapi_connection._prepared_statement_name_func = lambda: None
-    dbapi_connection._prepared_statement_cache = _NeverCache()
-
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
