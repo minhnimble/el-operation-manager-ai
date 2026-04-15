@@ -389,31 +389,33 @@ if st.button("Sync Slack", type="primary"):
 
             public_ch  = [c for c in all_channels if not c.get("is_private")]
             private_ch = [c for c in all_channels if c.get("is_private")]
+            total = len(all_channels)
 
             # Apply ignore list
             channels = [
                 ch for ch in all_channels
                 if not _should_skip_channel(ch.get("name", ""))
             ]
-            skipped = len(all_channels) - len(channels)
+            skipped = total - len(channels)
+
+            # Print the raw totals first so every subsequent number makes sense
+            skip_note = f", **{skipped}** ignored" if skipped else ""
+            st.write(
+                f"Found **{len(public_ch)}** public + **{len(private_ch)}** private "
+                f"= **{total}** channel(s){skip_note} → **{len(channels)}** to check."
+            )
 
             # When syncing a specific team member, filter to channels they're in.
             # The EM's token lists the EM's channels — the target may not be in all of them.
             if target_user_id != slack_user_id:
                 st.write(
-                    f"Checking which of the {len(channels)} channel(s) "
+                    f"Checking which of those **{len(channels)}** channel(s) "
                     f"**{selected_name}** is a member of…"
                 )
                 channels = run(
                     _filter_channels_by_member(access_token, slack_team_id, channels, target_user_id)
                 )
-                st.write(f"  → **{selected_name}** is in **{len(channels)}** channel(s).")
-
-            skip_note = f", {skipped} ignored" if skipped else ""
-            st.write(
-                f"Found **{len(public_ch)}** public + **{len(private_ch)}** private "
-                f"channels{skip_note}. Syncing **{len(channels)}**."
-            )
+                st.write(f"  → **{selected_name}** is in **{len(channels)}** — syncing those.")
         except Exception as e:
             slack_progress.empty()
             slack_status_text.empty()
