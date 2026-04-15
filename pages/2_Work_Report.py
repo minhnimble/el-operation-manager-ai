@@ -292,7 +292,8 @@ with col1:
 with col2:
     preset = st.selectbox(
         "Date range",
-        ["Last 7 days", "Last 14 days", "Last 30 days", "Custom"],
+        ["Last 30 days", "Last 3 months", "Last 6 months", "Custom"],
+        index=1,
     )
 
 with col3:
@@ -301,12 +302,12 @@ with col3:
 # Custom date range
 if preset == "Custom":
     c1, c2 = st.columns(2)
-    start_date = c1.date_input("From", value=date.today() - timedelta(days=14))
+    start_date = c1.date_input("From", value=date.today() - timedelta(days=90))
     end_date = c2.date_input("To", value=date.today())
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time().replace(microsecond=0))
 else:
-    days = {"Last 7 days": 7, "Last 14 days": 14, "Last 30 days": 30}[preset]
+    days = {"Last 30 days": 30, "Last 3 months": 90, "Last 6 months": 180}[preset]
     end_dt = datetime.utcnow()
     start_dt = end_dt - timedelta(days=days)
 
