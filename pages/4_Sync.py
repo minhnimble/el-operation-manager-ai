@@ -680,6 +680,32 @@ def _render_job_ui(job: dict, state_key: str) -> None:
             st.rerun()
 
 
+# Fragments re-render only themselves — no full-page rerun, so no dim flicker.
+# We self-poll only while running, and stop the fragment loop once the job ends.
+@st.fragment
+def _live_slack_job_fragment() -> None:
+    job = st.session_state.get("_slack_sync_job")
+    if not job:
+        return
+    with st.container(border=True):
+        _render_job_ui(job, "_slack_sync_job")
+    if job.get("running"):
+        time.sleep(1.5)
+        st.rerun(scope="fragment")
+
+
+@st.fragment
+def _live_github_job_fragment() -> None:
+    job = st.session_state.get("_github_sync_job")
+    if not job:
+        return
+    with st.container(border=True):
+        _render_job_ui(job, "_github_sync_job")
+    if job.get("running"):
+        time.sleep(1.5)
+        st.rerun(scope="fragment")
+
+
 # ── Page ──────────────────────────────────────────────────────────────────────
 
 st.title("🔄 Sync Data")
@@ -838,15 +864,10 @@ if sync_normal_clicked or sync_standup_clicked:
     ).start()
     st.rerun()
 
-# Show live / last-run progress for Slack (persists across page navigations)
-if "_slack_sync_job" in st.session_state:
-    with st.container(border=True):
-        _render_job_ui(st.session_state["_slack_sync_job"], "_slack_sync_job")
-
-# Auto-rerun every 1.5 s while Slack sync is in progress
-if st.session_state.get("_slack_sync_job", {}).get("running"):
-    time.sleep(1.5)
-    st.rerun()
+# Show live / last-run progress for Slack (persists across page navigations).
+# The fragment auto-refreshes itself every 1.5s without re-running the whole page,
+# so the rest of the UI no longer flickers / dims while a sync is in flight.
+_live_slack_job_fragment()
 
 st.markdown("---")
 
@@ -887,15 +908,8 @@ if members_with_gh:
         ).start()
         st.rerun()
 
-    # Show live / last-run progress for GitHub
-    if "_github_sync_job" in st.session_state:
-        with st.container(border=True):
-            _render_job_ui(st.session_state["_github_sync_job"], "_github_sync_job")
-
-    # Auto-rerun every 1.5 s while GitHub sync is in progress
-    if st.session_state.get("_github_sync_job", {}).get("running"):
-        time.sleep(1.5)
-        st.rerun()
+    # Fragment auto-refresh — avoids full-page rerun / dim flicker.
+    _live_github_job_fragment()
 
 st.markdown("---")
 
