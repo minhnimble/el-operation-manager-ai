@@ -65,7 +65,7 @@ async def _async_backfill(slack_user_id: str, team_id: str, days_back: int) -> N
                 channel_id = channel["id"]
                 channel_name = channel.get("name", "")
                 try:
-                    count = await ingester.backfill_channel(
+                    count, unresolved = await ingester.backfill_channel(
                         db=db,
                         channel_id=channel_id,
                         channel_name=channel_name,
@@ -74,8 +74,8 @@ async def _async_backfill(slack_user_id: str, team_id: str, days_back: int) -> N
                     )
                     await db.commit()
                     logger.info(
-                        "Backfilled %d messages from #%s for user %s",
-                        count, channel_name, slack_user_id,
+                        "Backfilled %d messages from #%s for user %s (unresolved: %s)",
+                        count, channel_name, slack_user_id, unresolved or "none",
                     )
                 except Exception as e:
                     logger.warning("Failed to backfill #%s: %s", channel_name, e)

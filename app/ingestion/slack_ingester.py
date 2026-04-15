@@ -356,8 +356,10 @@ class SlackIngester:
         slack_user_id: str,
         oldest: datetime | None = None,
         filter_user_id: str | None = None,
-    ) -> int:
-        """Backfill a channel into SlackMessage table. Returns count saved.
+    ) -> tuple[int, list[str]]:
+        """Backfill a channel into SlackMessage table.
+
+        Returns (count_saved, unresolved_bot_usernames).
 
         filter_user_id — when set, only messages sent by OR mentioning this
         user are stored. Pass None to store all messages (EM syncing for self).
@@ -372,6 +374,7 @@ class SlackIngester:
         is_standup = _is_standup_channel(channel_name)
         oldest_ts = oldest.timestamp() if oldest else None
         saved = 0
+        unresolved_bot_names: list[str] = []
 
         async for msg in self.iter_channel_messages(channel_id, oldest=oldest_ts):
             subtype = msg.get("subtype", "")
@@ -389,6 +392,11 @@ class SlackIngester:
                 ).strip()
                 if bot_username:
                     resolved_uid = await self._resolve_user_by_name(db, bot_username)
+                    logger.info(
+                        "Standup bot message in #%s: username=%r → resolved_uid=%s "
+                        "(filter_user_id=%s)",
+                        channel_name, bot_username, resolved_uid, filter_user_id,
+                    )
                     # For bot standup messages the ONLY valid check is whether the
                     # name resolves to the target user — mentions don't apply here
                     # (we don't want Alice's standup just because it mentions Don).
@@ -403,6 +411,10 @@ class SlackIngester:
                             user_id=resolved_uid,
                         ):
                             saved += 1
+                    elif resolved_uid is None:
+                        # Name didn't resolve — track it so the caller can warn
+                        if bot_username not in unresolved_bot_names:
+                            unresolved_bot_names.append(bot_username)
                 if msg.get("reply_count", 0) > 0:
                     async for reply in self.iter_thread_replies(channel_id, ts, oldest_ts):
                         if reply.get("subtype", "") in {"channel_join", "channel_leave"}:
@@ -481,8 +493,11 @@ class SlackIngester:
                                 saved += 1
 
         await db.flush()
-        logger.info("Backfilled %d messages from #%s", saved, channel_name)
-        return saved
+        logger.info(
+            "Backfilled %d messages from #%s (unresolved bot names: %s)",
+            saved, channel_name, unresolved_bot_names or "none",
+        )
+        return saved, unresolved_bot_names
 
     async def get_user_info(self, user_id: str) -> dict:
         data = await self._get("users.info", {"user": user_id})

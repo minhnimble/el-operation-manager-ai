@@ -92,6 +92,7 @@ async def save_slack_token(
 
     # Sync HTTP call — safe to call from async context
     display_name = None
+    real_name = None
     email = None
     try:
         user_info = get_user_info(user_token, slack_user_id)
@@ -101,6 +102,7 @@ async def save_slack_token(
             or profile.get("real_name")
             or user_info.get("name")
         )
+        real_name = profile.get("real_name") or display_name
         email = profile.get("email")
     except Exception as e:
         logger.warning("Could not fetch Slack user info: %s", e)
@@ -139,6 +141,7 @@ async def save_slack_token(
     user = user_result.scalar_one_or_none()
     if user:
         user.slack_display_name = display_name or user.slack_display_name
+        user.slack_real_name = real_name or user.slack_real_name
         user.slack_email = email or user.slack_email
         user.slack_team_id = team_id
         user.opted_in = True
@@ -147,6 +150,7 @@ async def save_slack_token(
             slack_user_id=slack_user_id,
             slack_team_id=team_id,
             slack_display_name=display_name,
+            slack_real_name=real_name,
             slack_email=email,
             opted_in=True,
         ))

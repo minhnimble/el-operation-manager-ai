@@ -129,15 +129,16 @@ async def _sync_slack_channel(
     channel_name: str,
     oldest: datetime,
     filter_user_id: str | None = None,
-) -> tuple[int, str | None]:
-    """Sync one channel. Returns (messages_saved, error_or_None).
+) -> tuple[int, str | None, list[str]]:
+    """Sync one channel. Returns (messages_saved, error_or_None, unresolved_bot_names).
 
     filter_user_id — when set, only messages from or mentioning this user are saved.
+    unresolved_bot_names — standup bot usernames that couldn't be matched to any user.
     """
     async with AsyncSessionLocal() as db:
         ingester = SlackIngester(user_token=access_token, team_id=team_id)
         try:
-            count = await ingester.backfill_channel(
+            count, unresolved = await ingester.backfill_channel(
                 db=db,
                 channel_id=channel_id,
                 channel_name=channel_name,
@@ -146,10 +147,10 @@ async def _sync_slack_channel(
                 filter_user_id=filter_user_id,
             )
             await db.commit()
-            return count, None
+            return count, None, unresolved
         except Exception as e:
             await db.rollback()
-            return 0, str(e)
+            return 0, str(e), []
         finally:
             await ingester.close()
 
@@ -427,6 +428,7 @@ if st.button("Sync Slack", type="primary"):
 
         # Step 2 — sync each channel
         n = max(len(channels), 1)
+        unresolved_standup_names: list[str] = []
         for i, ch in enumerate(channels):
             ch_id   = ch["id"]
             ch_name = ch.get("name", ch_id)
@@ -437,7 +439,7 @@ if st.button("Sync Slack", type="primary"):
 
             # Filter to target user's messages when syncing a team member
             member_filter = target_user_id if target_user_id != slack_user_id else None
-            count, err = run(
+            count, err, unresolved = run(
                 _sync_slack_channel(
                     access_token, slack_team_id, slack_user_id,
                     ch_id, ch_name, oldest,
@@ -451,6 +453,14 @@ if st.button("Sync Slack", type="primary"):
                 total_msgs += count
                 if count:
                     st.write(f"  ✓ {count} new message(s)")
+                if unresolved:
+                    for name in unresolved:
+                        if name not in unresolved_standup_names:
+                            unresolved_standup_names.append(name)
+                    st.write(
+                        f"  ⚠️ Standup bot name(s) not matched to any team member: "
+                        + ", ".join(f"**{n}**" for n in unresolved)
+                    )
 
         # Step 3 — normalize
         slack_progress.progress(92, text="Normalizing work units…")
