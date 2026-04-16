@@ -130,10 +130,17 @@ async def _load_user_map(slack_team_id: str) -> dict[str, str]:
 
 
 def _collect_unknown_user_ids(items: list[dict], known: dict[str, str]) -> set[str]:
-    """Scan message bodies for <@USER_ID> mentions not yet in the known map."""
+    """Scan message bodies for <@USER_ID> mentions not yet in the known map.
+
+    Also picks up ``sender_id`` values so that enriched sender names are
+    resolved even when the author isn't mentioned anywhere in the text.
+    """
     import re
     unknown: set[str] = set()
     for item in items:
+        sid = item.get("sender_id")
+        if sid and sid not in known:
+            unknown.add(sid)
         body = item.get("body") or item.get("title") or ""
         for uid in re.findall(r"<@([A-Z0-9]+)>", body):
             if uid not in known:
@@ -215,6 +222,82 @@ def _enrich_channel_map(
         except Exception:
             pass
     return enriched
+
+
+@st.cache_data(show_spinner=False, max_entries=200)
+def _fetch_slack_image_bytes(url: str, token: str) -> bytes | None:
+    """Fetch a Slack-hosted image with the user's Bearer token.
+
+    Slack file URLs (`url_private`, `thumb_*`) are auth-gated — a plain
+    `<img>` tag won't work. Cached per (url, token) so re-renders during the
+    same Streamlit session don't re-download.
+    """
+    if not url or not token:
+        return None
+    try:
+        import requests
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+            allow_redirects=True,
+        )
+        if resp.status_code == 200 and resp.content:
+            # Defensive: Slack sometimes returns the HTML login page (200) when
+            # the token can't see the file. Skip if the body looks like HTML.
+            ctype = resp.headers.get("Content-Type", "")
+            if ctype.startswith("image/"):
+                return resp.content
+    except Exception:
+        pass
+    return None
+
+
+def _render_slack_attachments(files: list[dict], slack_token: str | None) -> None:
+    """Render image files inline and non-image files as compact links.
+
+    Designed to be called inside whatever column the message body lives in
+    so attachments visually belong to that message.
+    """
+    if not files:
+        return
+    images = [f for f in files if (f.get("mimetype") or "").startswith("image/")]
+    others = [f for f in files if not (f.get("mimetype") or "").startswith("image/")]
+
+    # ── Images ────────────────────────────────────────────────────────────────
+    for f in images:
+        # Prefer thumb (smaller, faster) over full url_private.
+        url = f.get("thumb_url") or f.get("url_private")
+        img_bytes = _fetch_slack_image_bytes(url, slack_token) if slack_token else None
+        if img_bytes:
+            st.image(img_bytes, caption=f.get("name") or None, width=420)
+        elif f.get("permalink"):
+            # Fallback: clickable link (will require Slack login in the browser).
+            st.markdown(f"🖼️ [{f.get('name', 'image')}]({f['permalink']})")
+
+    # ── Other files ──────────────────────────────────────────────────────────
+    for f in others:
+        link = f.get("permalink") or f.get("url_private")
+        name = f.get("name", "file")
+        if link:
+            st.markdown(f"📎 [{name}]({link})")
+        else:
+            st.markdown(f"📎 {name}")
+
+
+def _format_sender(item: dict, user_map: dict[str, str]) -> str:
+    """Return a markdown-bold sender label for a Slack activity item.
+
+    Falls back to the bot-repost username, then to "—" if neither is present
+    (e.g. very old rows captured before sender enrichment landed).
+    """
+    sid = item.get("sender_id")
+    sname = item.get("sender_name")
+    if sid:
+        return user_map.get(sid, sid)
+    if sname:
+        return sname
+    return "—"
 
 
 def _format_slack_text(text: str, user_map: dict[str, str]) -> str:
@@ -351,29 +434,32 @@ _unknown_channel_ids = {
     if a.get("slack_channel_id") and a["slack_channel_id"] not in _channel_map
 }
 
-if _unknown_user_ids or _unknown_channel_ids:
-    try:
-        from app.models.slack_token import SlackUserToken
+# Always fetch the Slack token — needed for image attachment fetching
+# (Slack file URLs are bearer-auth gated). Enrichment of unknown users /
+# channels still piggybacks on the same token when present.
+_slack_token: str | None = None
+try:
+    from app.models.slack_token import SlackUserToken
 
-        async def _get_slack_token_for_report() -> str | None:
-            async with AsyncSessionLocal() as _db:
-                _r = await _db.execute(
-                    select(SlackUserToken).where(
-                        SlackUserToken.slack_user_id == slack_user_id,
-                        SlackUserToken.slack_team_id == slack_team_id,
-                    )
+    async def _get_slack_token_for_report() -> str | None:
+        async with AsyncSessionLocal() as _db:
+            _r = await _db.execute(
+                select(SlackUserToken).where(
+                    SlackUserToken.slack_user_id == slack_user_id,
+                    SlackUserToken.slack_team_id == slack_team_id,
                 )
-                _rec = _r.scalar_one_or_none()
-                return _rec.access_token if _rec else None
+            )
+            _rec = _r.scalar_one_or_none()
+            return _rec.access_token if _rec else None
 
-        _slack_token = run(_get_slack_token_for_report())
-        if _slack_token:
-            if _unknown_user_ids:
-                _user_map = _enrich_user_map(_user_map, _unknown_user_ids, _slack_token)
-            if _unknown_channel_ids:
-                _channel_map = _enrich_channel_map(_channel_map, _unknown_channel_ids, _slack_token)
-    except Exception:
-        pass  # enrichment is best-effort; falls back to raw ID on any error
+    _slack_token = run(_get_slack_token_for_report())
+    if _slack_token:
+        if _unknown_user_ids:
+            _user_map = _enrich_user_map(_user_map, _unknown_user_ids, _slack_token)
+        if _unknown_channel_ids:
+            _channel_map = _enrich_channel_map(_channel_map, _unknown_channel_ids, _slack_token)
+except Exception:
+    pass  # enrichment is best-effort; falls back to raw ID on any error
 
 # Patch channel_name in activity items using the enriched channel map
 for _a in report.recent_activity:
@@ -497,15 +583,23 @@ with st.expander(f"Standups ({len(standups)})", expanded=len(standups) > 0):
     else:
         for _i, item in enumerate(standups):
             ts      = item["timestamp"]
-            raw     = item["body"] or item["title"] or "(empty)"
-            body    = _format_standup_body(_format_slack_text(raw, _user_map))
+            sender  = _format_sender(item, _user_map)
+            files   = item.get("files") or []
+            raw_text = item["body"] or item["title"] or ""
+            # Only show "(empty)" when there's also no attachment to render
+            if not raw_text and not files:
+                raw_text = "(empty)"
+            body    = _format_standup_body(_format_slack_text(raw_text, _user_map)) if raw_text else ""
             ch_name = item.get("channel_name") or item.get("slack_channel_id") or ""
             ch      = f"#{ch_name}" if ch_name else ""
             _hdr_col, _btn_col = st.columns([8, 1])
-            _hdr_col.markdown(f"**{ts}** {ch}")
+            _hdr_col.markdown(f"**{sender}** · {ts} {ch}")
             with _btn_col:
-                _copy_button(body, key=f"copy_standup_{_i}")
-            st.markdown(body)
+                # Copy button still copies just the text body (not the images)
+                _copy_button(body or raw_text, key=f"copy_standup_{_i}")
+            if body:
+                st.markdown(body)
+            _render_slack_attachments(files, _slack_token)
             st.divider()
 
 with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
@@ -517,16 +611,23 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
         _csv_buf = io.StringIO()
         _writer  = csv.DictWriter(
             _csv_buf,
-            fieldnames=["timestamp", "channel", "type", "body", "url"],
+            fieldnames=["timestamp", "sender", "channel", "type", "body", "files", "url"],
             extrasaction="ignore",
         )
         _writer.writeheader()
         for _item in other_slack:
+            _file_links = "; ".join(
+                (f.get("permalink") or f.get("url_private") or "")
+                for f in (_item.get("files") or [])
+                if f.get("permalink") or f.get("url_private")
+            )
             _writer.writerow({
                 "timestamp": _item["timestamp"],
+                "sender":    _format_sender(_item, _user_map),
                 "channel":   _item.get("channel_name") or _item.get("slack_channel_id") or "",
                 "type":      _item["type"],
                 "body":      _item["body"] or _item["title"] or "",
+                "files":     _file_links,
                 "url":       _item.get("url") or "",
             })
         st.download_button(
@@ -550,17 +651,27 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
         for _ch_name, _msgs in sorted(_by_channel.items()):
             st.markdown(f"**#{_ch_name}** &nbsp; <small>{len(_msgs)} message(s)</small>", unsafe_allow_html=True)
             for item in _msgs:
-                icon = _SLACK_ICONS.get(item["type"], "💬")
-                ts   = item["timestamp"]
-                raw  = item["body"] or item["title"] or "(empty)"
-                body = _format_slack_text(raw, _user_map)
+                icon   = _SLACK_ICONS.get(item["type"], "💬")
+                ts     = item["timestamp"]
+                sender = _format_sender(item, _user_map)
+                files  = item.get("files") or []
+                raw_text = item["body"] or item["title"] or ""
+                # Don't print "(empty)" when there's at least one attachment
+                if not raw_text and not files:
+                    raw_text = "_(no text)_"
+                body = _format_slack_text(raw_text, _user_map) if raw_text else ""
 
                 col_icon, col_body, col_ts, col_copy = st.columns([0.3, 5, 1.5, 0.7])
                 col_icon.markdown(icon)
-                col_body.markdown(body)
+                with col_body:
+                    # Sender on its own line above the body so it's always visible
+                    st.markdown(f"**{sender}**")
+                    if body:
+                        st.markdown(body)
+                    _render_slack_attachments(files, _slack_token)
                 col_ts.caption(ts)
                 with col_copy:
-                    _copy_button(body, key=f"copy_slack_{_msg_idx}")
+                    _copy_button(body or raw_text, key=f"copy_slack_{_msg_idx}")
                 _msg_idx += 1
             st.markdown("---")
 

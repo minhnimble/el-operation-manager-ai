@@ -116,8 +116,85 @@ async def build_work_report(
         ).order_by(WorkUnit.timestamp.desc()).limit(100)
     )
     activity_units = activity_result.scalars().all()
-    recent_activity = [
-        {
+
+    # ── Enrich Slack items with sender + file attachments ─────────────────────
+    # We persist the SlackMessage row's slack_user_id as the *target* of the
+    # sync (mention-attribution rewrites the author), so the WorkUnit's
+    # slack_user_id is unreliable as "who actually wrote this". The original
+    # author lives in SlackMessage.raw_payload["user"] (or "username" /
+    # "user_profile" for bot reposts). Same payload also carries any uploaded
+    # files we can render inline. One bulk query keeps this O(1).
+    slack_ts_list = [
+        wu.slack_message_ts for wu in activity_units
+        if wu.source == WorkUnitSource.SLACK and wu.slack_message_ts
+    ]
+    slack_payload_by_ts: dict[str, dict] = {}
+    if slack_ts_list:
+        sm_rows = await db.execute(
+            select(_SlackMessage.message_ts, _SlackMessage.raw_payload).where(
+                _SlackMessage.message_ts.in_(slack_ts_list),
+            )
+        )
+        for ts, payload in sm_rows.all():
+            if payload:
+                slack_payload_by_ts[ts] = payload
+
+    def _extract_sender(payload: dict) -> tuple[str | None, str | None]:
+        """Return (sender_user_id, sender_display_name) from a Slack payload.
+
+        Bot reposts (Geekbot etc.) don't have a real `user` field — the bot
+        posts under the user's name via `username` / `user_profile`. For those
+        we surface the display name instead.
+        """
+        if not payload:
+            return None, None
+        uid = payload.get("user")
+        if uid:
+            return uid, None
+        # Bot-reposted on behalf of someone — name only, no resolvable uid
+        name = (
+            payload.get("username")
+            or (payload.get("user_profile") or {}).get("display_name")
+            or (payload.get("user_profile") or {}).get("real_name")
+        )
+        return None, name
+
+    def _extract_files(payload: dict) -> list[dict]:
+        """Return a normalized list of file metadata for inline rendering.
+
+        Only fields the UI needs — kept small to avoid bloating the report
+        payload. Slack file URLs are private and require Bearer auth, so the
+        UI fetches them via the user's stored token at render time.
+        """
+        if not payload:
+            return []
+        files = payload.get("files") or []
+        out: list[dict] = []
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            out.append({
+                "id": f.get("id"),
+                "name": f.get("name") or f.get("title") or "file",
+                "mimetype": f.get("mimetype") or "",
+                "filetype": f.get("filetype") or "",
+                "size": f.get("size") or 0,
+                # Prefer a thumbnail for inline display; fall back to full URL.
+                "url_private": f.get("url_private") or "",
+                "thumb_url": (
+                    f.get("thumb_720")
+                    or f.get("thumb_480")
+                    or f.get("thumb_360")
+                    or f.get("thumb_160")
+                    or ""
+                ),
+                "permalink": f.get("permalink") or "",
+            })
+        return out
+
+    recent_activity: list[dict] = []
+    for wu in activity_units:
+        item = {
             "source": wu.source.value,
             "type": wu.type.value,
             "title": wu.title or "",
@@ -132,9 +209,19 @@ async def build_work_report(
                 or ""
             ),
             "timestamp": wu.timestamp.strftime("%b %d, %Y %H:%M"),
+            "slack_message_ts": wu.slack_message_ts or "",
+            "sender_id": None,
+            "sender_name": None,
+            "files": [],
         }
-        for wu in activity_units
-    ]
+        if wu.source == WorkUnitSource.SLACK and wu.slack_message_ts:
+            payload = slack_payload_by_ts.get(wu.slack_message_ts)
+            if payload:
+                sid, sname = _extract_sender(payload)
+                item["sender_id"] = sid
+                item["sender_name"] = sname
+                item["files"] = _extract_files(payload)
+        recent_activity.append(item)
 
     report = WorkReport(
         user_display_name=display_name,
