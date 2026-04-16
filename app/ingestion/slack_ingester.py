@@ -47,7 +47,7 @@ class SlackIngester:
     async def close(self) -> None:
         await self._client.aclose()
 
-    @retry(stop=stop_after_attempt(6), wait=wait_exponential(min=1, max=10),
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10),
            reraise=True)
     async def _get(self, endpoint: str, params: dict) -> dict:
         resp = await self._client.get(f"/{endpoint}", params=params)
