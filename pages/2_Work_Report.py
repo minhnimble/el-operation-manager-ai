@@ -365,18 +365,46 @@ if not slack_user_id:
 
 from app.ui.page_utils import loading_section
 
+# ── Cache team options in session state ───────────────────────────────────────
+# _get_team_options hits the DB every rerun — cache it so changing the date
+# range, toggling AI insights, or clicking Generate doesn't re-query the team.
+# Cache is keyed by (user_id, team_id) and invalidated on page refresh via the
+# 🔄 button below.
+def _load_report_members(user_id: str, team_id: str, self_name: str) -> dict:
+    cache = st.session_state.get("_report_members_cache")
+    if cache and cache["user_id"] == user_id and cache["team_id"] == team_id:
+        return cache["options"]
+    options = run(_get_team_options(user_id, team_id, self_name))
+    st.session_state["_report_members_cache"] = {
+        "user_id": user_id, "team_id": team_id, "options": options,
+    }
+    return options
+
 col1, col2, col3 = st.columns([2, 2, 1])
 
 with col1:
     self_name = st.session_state.get("slack_display_name", slack_user_id)
-    with loading_section("Loading team members…", n_skeleton_lines=1):
-        user_options = run(_get_team_options(slack_user_id, slack_team_id, self_name))
-
-    selected_name = st.selectbox(
-        "Team member",
-        options=list(user_options.keys()),
-        help="Add team members on the Team Overview page.",
+    _cache_hit = bool(
+        st.session_state.get("_report_members_cache")
+        and st.session_state["_report_members_cache"].get("user_id") == slack_user_id
     )
+    if _cache_hit:
+        user_options = _load_report_members(slack_user_id, slack_team_id, self_name)
+    else:
+        with loading_section("Loading team members…", n_skeleton_lines=1):
+            user_options = _load_report_members(slack_user_id, slack_team_id, self_name)
+
+    _rcol1, _rcol2 = st.columns([5, 1])
+    with _rcol2:
+        if st.button("🔄", key="refresh_report_members", help="Refresh team list"):
+            st.session_state.pop("_report_members_cache", None)
+            st.rerun()
+    with _rcol1:
+        selected_name = st.selectbox(
+            "Team member",
+            options=list(user_options.keys()),
+            help="Add team members on the Team Overview page.",
+        )
     target_user_id = user_options[selected_name]
 
 with col2:
