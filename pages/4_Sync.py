@@ -729,6 +729,13 @@ def _render_job_ui(job: dict, state_key: str) -> None:
         # Show Stop button while sync is in progress
         if job.get("stop_requested"):
             st.warning("⏳ Stopping after the current channel/repo finishes…")
+            # Force-abandon: detach the job from the UI.  The orphan daemon
+            # thread will finish on its own but the user can start a new sync.
+            if st.button("⏹ Force stop (abandon)", key=f"_force_stop_{state_key}", type="primary"):
+                job["running"] = False
+                job["summary"] = "🛑 Force stopped — orphan thread may still be running in the background."
+                st.session_state.pop(state_key, None)
+                st.rerun()
         elif st.button("⏹ Stop sync", key=f"_stop_{state_key}", type="secondary"):
             job["stop_requested"] = True
     else:
