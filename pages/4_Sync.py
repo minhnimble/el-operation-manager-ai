@@ -58,6 +58,43 @@ _IGNORED_CHANNEL_PREFIXES = ("ic-", "nimble")
 _ALWAYS_INCLUDE_CHANNELS = {"daily-standup"}
 
 
+# ── Process-wide sync generation counters ─────────────────────────────────────
+# Daemon threads in Python cannot be killed externally — and on Streamlit Cloud
+# they survive code redeploys until the dyno restarts. Each new sync bumps the
+# matching counter; in-flight daemon threads see the mismatch on their next
+# cancel_check and exit immediately, so a stale "Sync Slack Messages" thread
+# can never write into the DB after a fresh "Sync Daily Standup" starts.
+#
+# These are MODULE-LEVEL globals so they persist across Streamlit reruns inside
+# the same Python process.
+
+_slack_sync_gen: int = 0
+_github_sync_gen: int = 0
+_sync_gen_lock = threading.Lock()
+
+
+def _bump_slack_gen() -> int:
+    global _slack_sync_gen
+    with _sync_gen_lock:
+        _slack_sync_gen += 1
+        return _slack_sync_gen
+
+
+def _bump_github_gen() -> int:
+    global _github_sync_gen
+    with _sync_gen_lock:
+        _github_sync_gen += 1
+        return _github_sync_gen
+
+
+def _slack_gen_alive(my_gen: int) -> bool:
+    return _slack_sync_gen == my_gen
+
+
+def _github_gen_alive(my_gen: int) -> bool:
+    return _github_sync_gen == my_gen
+
+
 def _should_skip_channel(name: str) -> bool:
     n = name.lower()
     return (
@@ -527,11 +564,30 @@ def _run_slack_sync_bg(
     oldest: "datetime",
     latest: "datetime | None",
     slack_sync_mode: str,
+    my_gen: int,
 ) -> None:
-    """Runs in a daemon thread — updates `job` dict with live progress."""
+    """Runs in a daemon thread — updates `job` dict with live progress.
+
+    *my_gen* is the generation counter snapshot from when this thread was
+    started. If a newer Slack sync starts (which bumps `_slack_sync_gen`),
+    this thread's cancel hook flips True and we abort cleanly — preventing
+    an old normal-mode thread from continuing to write to the DB after a
+    new standup-mode sync begins.
+    """
 
     def _run(coro):
         return asyncio.run(coro)
+
+    # Hard allowlist for standup mode: even if any rogue channel sneaks into
+    # `channels`, we refuse to touch it. Belt-and-suspenders against the
+    # exact bug reported (non-standup channels being synced in standup mode).
+    allowed_names: set[str] | None = (
+        _ALWAYS_INCLUDE_CHANNELS if slack_sync_mode == "standup" else None
+    )
+
+    # Combined cancel: per-job stop button OR a newer sync superseding us.
+    def _cancel() -> bool:
+        return job.get("stop_requested", False) or not _slack_gen_alive(my_gen)
 
     try:
         grand_msgs = 0
@@ -558,8 +614,11 @@ def _run_slack_sync_bg(
         total_members = len(target_users)
         stopped = False
         for idx, (member_name, target_user_id) in enumerate(target_users):
-            if job.get("stop_requested"):
-                _jlog(job, "\n🛑 Stop requested — aborting remaining members.", "warn")
+            if _cancel():
+                if not _slack_gen_alive(my_gen):
+                    _jlog(job, "\n🛑 Superseded by a newer sync — exiting.", "warn")
+                else:
+                    _jlog(job, "\n🛑 Stop requested — aborting remaining members.", "warn")
                 stopped = True
                 break
 
@@ -590,12 +649,38 @@ def _run_slack_sync_bg(
                         ))
                         _jlog(job, f"  → {len(channels)} channel(s).")
 
+                # Hard guard: in standup mode, drop anything that isn't on the
+                # allowlist. Defends against API quirks or stale code paths.
+                if allowed_names is not None:
+                    before = len(channels)
+                    channels = [
+                        c for c in channels
+                        if c.get("name", "").lower() in allowed_names
+                    ]
+                    if len(channels) != before:
+                        _jlog(
+                            job,
+                            f"  ⛔ Dropped {before - len(channels)} non-standup "
+                            f"channel(s) — standup mode allowlist enforced.",
+                            "warn",
+                        )
+
                 n_ch = max(len(channels), 1)
                 for ch_idx, ch in enumerate(channels):
-                    if job.get("stop_requested"):
-                        _jlog(job, "  🛑 Stop requested — skipping remaining channels.", "warn")
+                    if _cancel():
+                        if not _slack_gen_alive(my_gen):
+                            _jlog(job, "  🛑 Superseded by a newer sync — exiting.", "warn")
+                        else:
+                            _jlog(job, "  🛑 Stop requested — skipping remaining channels.", "warn")
                         stopped = True
                         break
+
+                    # Defense in depth: re-check the allowlist on each channel
+                    # so an in-flight loop can't slip a non-standup channel
+                    # through even if the list above was somehow mutated.
+                    if allowed_names is not None and ch.get("name", "").lower() not in allowed_names:
+                        _jlog(job, f"  ⛔ Skipping #{ch.get('name')} — not in standup allowlist.", "warn")
+                        continue
 
                     ch_id   = ch["id"]
                     ch_name = ch.get("name", ch_id)
@@ -619,7 +704,7 @@ def _run_slack_sync_bg(
                         access_token, slack_team_id, slack_user_id,
                         ch_id, ch_name, oldest, latest=latest,
                         filter_user_id=mf,
-                        cancel_check=lambda: job.get("stop_requested", False),
+                        cancel_check=_cancel,
                     ))
                     if err:
                         member_errors.append(f"#{ch_name}: {err}")
@@ -677,11 +762,20 @@ def _run_github_sync_bg(
     members_with_gh: list,
     gh_info: dict,
     since: "datetime",
+    my_gen: int,
 ) -> None:
-    """Runs in a daemon thread — updates `job` dict with live progress."""
+    """Runs in a daemon thread — updates `job` dict with live progress.
+
+    *my_gen* is the GitHub-sync generation snapshot. A newer GitHub sync
+    bumps the counter and supersedes any in-flight thread, ensuring stale
+    daemon threads can't keep writing after a restart.
+    """
 
     def _run(coro):
         return asyncio.run(coro)
+
+    def _cancel() -> bool:
+        return job.get("stop_requested", False) or not _github_gen_alive(my_gen)
 
     try:
         grand: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
@@ -689,8 +783,11 @@ def _run_github_sync_bg(
         total_members = len(members_with_gh)
         stopped = False
         for idx, (member_name, target_user_id) in enumerate(members_with_gh):
-            if job.get("stop_requested"):
-                _jlog(job, "\n🛑 Stop requested — aborting remaining members.", "warn")
+            if _cancel():
+                if not _github_gen_alive(my_gen):
+                    _jlog(job, "\n🛑 Superseded by a newer GitHub sync — exiting.", "warn")
+                else:
+                    _jlog(job, "\n🛑 Stop requested — aborting remaining members.", "warn")
                 stopped = True
                 break
 
@@ -711,8 +808,11 @@ def _run_github_sync_bg(
                 tc: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
                 n_repos = max(len(repos), 1)
                 for r_idx, repo in enumerate(repos):
-                    if job.get("stop_requested"):
-                        _jlog(job, "  🛑 Stop requested — skipping remaining repos.", "warn")
+                    if _cancel():
+                        if not _github_gen_alive(my_gen):
+                            _jlog(job, "  🛑 Superseded by a newer GitHub sync — exiting.", "warn")
+                        else:
+                            _jlog(job, "  🛑 Stop requested — skipping remaining repos.", "warn")
                         stopped = True
                         break
 
@@ -997,12 +1097,18 @@ if sync_normal_clicked or sync_standup_clicked:
     except Exception as e:
         st.error(str(e))
         st.stop()
+    # Bump the generation counter — any older Slack daemon thread (including
+    # ones started before today's redeploy that ignore stop_requested) will
+    # see the mismatch on its next cancel-check and exit. New threads only.
+    my_gen = _bump_slack_gen()
     job = _make_job("Slack")
+    job["_gen"] = my_gen
+    job["_mode"] = slack_sync_mode
     st.session_state["_slack_sync_job"] = job
     threading.Thread(
         target=_run_slack_sync_bg,
         args=(job, access_token, slack_user_id, slack_team_id,
-              target_users, sync_start, sync_end, slack_sync_mode),
+              target_users, sync_start, sync_end, slack_sync_mode, my_gen),
         daemon=True,
     ).start()
     st.rerun()
@@ -1041,11 +1147,14 @@ if members_with_gh:
     st.caption(f"Will sync: {gh_list}")
 
     if st.button("Sync GitHub", type="primary"):
+        # Bump the GitHub gen counter — supersedes any older daemon thread.
+        my_gh_gen = _bump_github_gen()
         job = _make_job("GitHub")
+        job["_gen"] = my_gh_gen
         st.session_state["_github_sync_job"] = job
         threading.Thread(
             target=_run_github_sync_bg,
-            args=(job, slack_team_id, members_with_gh, gh_info, sync_start),
+            args=(job, slack_team_id, members_with_gh, gh_info, sync_start, my_gh_gen),
             daemon=True,
         ).start()
         st.rerun()
