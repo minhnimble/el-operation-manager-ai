@@ -593,7 +593,8 @@ with st.expander(f"Standups ({len(standups)})", expanded=len(standups) > 0):
             ch_name = item.get("channel_name") or item.get("slack_channel_id") or ""
             ch      = f"#{ch_name}" if ch_name else ""
             _hdr_col, _btn_col = st.columns([8, 1])
-            _hdr_col.markdown(f"**{sender}** · {ts} {ch}")
+            header = f"· {ts} {ch}" if sender == "—" else f"**{sender}** · {ts} {ch}"
+            _hdr_col.markdown(header)
             with _btn_col:
                 # Copy button still copies just the text body (not the images)
                 _copy_button(body or raw_text, key=f"copy_standup_{_i}")
