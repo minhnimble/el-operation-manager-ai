@@ -78,9 +78,27 @@ class WorkExtractor:
             )
         except Exception as e:
             logger.warning("Work extraction failed: %s", e)
+            _raise_if_billing(e)
             return StandupExtraction(
                 work_items=[], blockers=[], raw_standup_text=standup_text
             )
 
     def batch_extract(self, standup_texts: list[str]) -> list[StandupExtraction]:
         return [self.extract_from_standup(t) for t in standup_texts]
+
+
+def _raise_if_billing(exc: Exception) -> None:
+    """Re-raise the exception as AIBillingError if it's an Anthropic billing issue."""
+    msg = str(exc).lower()
+    if "credit balance" in msg or "too low" in msg or "payment" in msg or "billing" in msg:
+        raise AIBillingError() from exc
+
+
+class AIBillingError(RuntimeError):
+    """Raised when Anthropic rejects the request due to insufficient credits."""
+    def __str__(self) -> str:
+        return (
+            "Anthropic API credits exhausted. "
+            "Go to console.anthropic.com → Plans & Billing to top up, "
+            "then re-generate the report."
+        )

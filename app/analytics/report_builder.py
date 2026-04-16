@@ -239,27 +239,33 @@ async def build_work_report(
     )
 
     if include_ai and standup_texts:
-        extractor = WorkExtractor()
-        extractions: list[StandupExtraction] = extractor.batch_extract(standup_texts)
+        from app.ai.work_extractor import AIBillingError
+        try:
+            extractor = WorkExtractor()
+            extractions: list[StandupExtraction] = extractor.batch_extract(standup_texts)
 
-        category_counts: dict[str, int] = {}
-        for extraction in extractions:
-            for item in extraction.work_items:
-                category_counts[item.category] = (
-                    category_counts.get(item.category, 0) + 1
-                )
+            category_counts: dict[str, int] = {}
+            for extraction in extractions:
+                for item in extraction.work_items:
+                    category_counts[item.category] = (
+                        category_counts.get(item.category, 0) + 1
+                    )
 
-        report.feature_work = category_counts.get("feature", 0)
-        report.bug_fixes = category_counts.get("bug_fix", 0)
-        report.architecture_work = category_counts.get("architecture", 0)
-        report.mentorship = category_counts.get("mentorship", 0)
-        report.incidents = category_counts.get("incident", 0)
+            report.feature_work = category_counts.get("feature", 0)
+            report.bug_fixes = category_counts.get("bug_fix", 0)
+            report.architecture_work = category_counts.get("architecture", 0)
+            report.mentorship = category_counts.get("mentorship", 0)
+            report.incidents = category_counts.get("incident", 0)
 
-        # Generate leadership insights
-        insight_gen = InsightGenerator()
-        insights = insight_gen.generate(report)
-        report.ai_insights = insights.summary
-        report.standup_summary = insights.standup_vs_github_alignment
+            # Generate leadership insights
+            insight_gen = InsightGenerator()
+            insights = insight_gen.generate(report)
+            report.ai_insights = insights.summary
+            report.standup_summary = insights.standup_vs_github_alignment
+
+        except AIBillingError as e:
+            logger.warning("AI disabled — billing error: %s", e)
+            report.ai_error = str(e)
 
     return report
 

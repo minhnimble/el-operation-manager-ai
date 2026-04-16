@@ -523,7 +523,14 @@ with col_right:
         st.info("No standup data available for AI classification in this period.")
 
 # AI insights
-if report.ai_insights:
+if getattr(report, "ai_error", ""):
+    st.markdown("---")
+    st.warning(
+        f"⚠️ **AI insights unavailable** — {report.ai_error}\n\n"
+        f"Turn off the **AI insights** toggle to generate the report without AI, "
+        f"or top up your Anthropic credits and try again."
+    )
+elif report.ai_insights:
     st.markdown("---")
     st.markdown("**AI Insights**")
     st.info(report.ai_insights)

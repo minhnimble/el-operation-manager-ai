@@ -100,6 +100,8 @@ class InsightGenerator:
             return InsightResult(**data)
         except Exception as e:
             logger.warning("Insight generation failed: %s", e)
+            from app.ai.work_extractor import _raise_if_billing
+            _raise_if_billing(e)
             return InsightResult(
                 summary="Insight generation unavailable.",
                 highlights=[],

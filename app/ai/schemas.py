@@ -43,6 +43,8 @@ class WorkReport(BaseModel):
     # Summaries
     standup_summary: str = ""
     ai_insights: str = ""
+    # Set when AI calls fail due to billing / quota — surfaced as a UI warning
+    ai_error: str = ""
     # Raw standups for display
     recent_standups: list[str] = Field(default_factory=list)
     # Serialized WorkUnit dicts for the activity feed
