@@ -87,6 +87,65 @@ async def _get_team_options(manager_user_id: str, manager_team_id: str, self_nam
     return options
 
 
+async def _get_github_links_batch(
+    slack_user_ids: list[str], slack_team_id: str,
+) -> dict[str, tuple[bool, str]]:
+    """Batch-fetch GitHub link info for multiple users in a single query."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(
+                UserGitHubLink.slack_user_id,
+                UserGitHubLink.github_access_token,
+                UserGitHubLink.github_login,
+            ).where(
+                UserGitHubLink.slack_user_id.in_(slack_user_ids),
+                UserGitHubLink.slack_team_id == slack_team_id,
+            )
+        )
+        links = {
+            row.slack_user_id: (bool(row.github_access_token), row.github_login or "")
+            for row in result.all()
+        }
+    # Fill in missing users (no GitHub link)
+    return {uid: links.get(uid, (False, "")) for uid in slack_user_ids}
+
+
+def _load_sync_page_data(
+    manager_user_id: str, manager_team_id: str, self_name: str,
+) -> tuple[dict[str, str], dict[str, tuple[bool, str]]]:
+    """Load team options + GitHub link info. Cached in session state to avoid
+    re-querying the DB on every widget interaction (multiselect change, button
+    click, date slider adjustment, etc.)."""
+    cache = st.session_state.get("_sync_page_cache")
+    if (
+        cache
+        and cache["user_id"] == manager_user_id
+        and cache["team_id"] == manager_team_id
+    ):
+        return cache["team_options"], cache["gh_links"]
+
+    team_options = run(_get_team_options(manager_user_id, manager_team_id, self_name))
+    all_uids = list(team_options.values())
+    gh_links = run(_get_github_links_batch(all_uids, manager_team_id))
+    # Map by display name for easy lookup later
+    gh_links_by_name = {
+        name: gh_links.get(uid, (False, ""))
+        for name, uid in team_options.items()
+    }
+
+    st.session_state["_sync_page_cache"] = {
+        "user_id": manager_user_id,
+        "team_id": manager_team_id,
+        "team_options": team_options,
+        "gh_links": gh_links_by_name,
+    }
+    return team_options, gh_links_by_name
+
+
+def _invalidate_sync_cache():
+    st.session_state.pop("_sync_page_cache", None)
+
+
 # ── Slack helpers (one asyncio.run() per step) ────────────────────────────────
 
 async def _get_slack_token(slack_user_id: str, team_id: str) -> str:
@@ -789,7 +848,7 @@ st.markdown("---")
 # ─── Team member selector ─────────────────────────────────────────────────────
 
 self_name = st.session_state.get("slack_display_name", slack_user_id)
-team_options = run(_get_team_options(slack_user_id, slack_team_id, self_name))
+team_options, _gh_links_by_name = _load_sync_page_data(slack_user_id, slack_team_id, self_name)
 all_member_names = list(team_options.keys())
 
 # Initialise to just "myself" on first load
@@ -799,7 +858,7 @@ if "sync_member_select" not in st.session_state:
 _self_label = all_member_names[0]  # always the "(me)" entry
 _team_only_names = [n for n in all_member_names if n != _self_label]
 
-_sel_col1, _sel_col2, _sel_col3, _sel_col4 = st.columns([5, 1, 1, 1])
+_sel_col1, _sel_col2, _sel_col3, _sel_col4, _sel_col5 = st.columns([5, 1, 1, 1, 1])
 with _sel_col2:
     if st.button("All", use_container_width=True, help="Select everyone including yourself"):
         st.session_state["sync_member_select"] = all_member_names
@@ -811,6 +870,10 @@ with _sel_col3:
 with _sel_col4:
     if st.button("Clear", use_container_width=True, help="Clear selection"):
         st.session_state["sync_member_select"] = []
+        st.rerun()
+with _sel_col5:
+    if st.button("🔄", use_container_width=True, help="Refresh team list from database"):
+        _invalidate_sync_cache()
         st.rerun()
 with _sel_col1:
     selected_names: list[str] = st.multiselect(
@@ -939,11 +1002,10 @@ st.markdown("---")
 
 st.subheader("GitHub")
 
-# Check GitHub connectivity for every selected member
-gh_info: dict[str, tuple[bool, str]] = {}
-for _name, _uid in target_users:
-    _has_tok, _login = run(_get_github_link_info(_uid, slack_team_id))
-    gh_info[_name] = (_has_tok, _login)
+# Check GitHub connectivity for every selected member (from cache — no DB call)
+gh_info: dict[str, tuple[bool, str]] = {
+    name: _gh_links_by_name.get(name, (False, "")) for name, _uid in target_users
+}
 
 members_with_gh = [(n, u) for n, u in target_users if gh_info[n][0]]
 members_no_gh   = [(n, u) for n, u in target_users if not gh_info[n][0]]
