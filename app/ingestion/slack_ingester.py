@@ -21,7 +21,7 @@ from typing import AsyncIterator
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from app.models.raw_data import SlackMessage
 from app.models.slack_token import SlackUserToken
@@ -35,9 +35,16 @@ def _is_standup_channel(channel_name: str) -> bool:
     return any(kw in channel_name.lower() for kw in STANDUP_CHANNEL_KEYWORDS)
 
 
+class CancelledError(RuntimeError):
+    """Raised when the ingester's cancel_check signals to stop."""
+
+
 class SlackIngester:
     def __init__(self, user_token: str, team_id: str):
         self.team_id = team_id
+        # Optional cancel callable, set by backfill_channel so HTTP layer can
+        # bail out of rate-limit waits and skip retries when stop is requested.
+        self._cancel_check: "callable | None" = None
         self._client = httpx.AsyncClient(
             base_url="https://slack.com/api",
             headers={"Authorization": f"Bearer {user_token}"},
@@ -47,9 +54,35 @@ class SlackIngester:
     async def close(self) -> None:
         await self._client.aclose()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10),
-           reraise=True)
+    def _is_cancelled(self) -> bool:
+        return bool(self._cancel_check and self._cancel_check())
+
+    async def _interruptible_sleep(self, seconds: float) -> None:
+        """Sleep that wakes up early if cancellation is requested."""
+        end = asyncio.get_event_loop().time() + seconds
+        while True:
+            if self._is_cancelled():
+                raise CancelledError("Cancelled during sleep")
+            remaining = end - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, 0.25))
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=1, max=10),
+        # Do NOT retry when the user requested Stop — bubble up immediately.
+        retry=retry_if_not_exception_type(CancelledError),
+        reraise=True,
+    )
     async def _get(self, endpoint: str, params: dict) -> dict:
+        # Bail before the request if cancellation already signalled — tenacity
+        # will see CancelledError and (because retry only catches RuntimeError
+        # subclasses we don't filter) reraise. We subclass RuntimeError so the
+        # caller's existing except-RuntimeError still cleans up.
+        if self._is_cancelled():
+            raise CancelledError(f"Cancelled before {endpoint}")
+
         resp = await self._client.get(f"/{endpoint}", params=params)
 
         # Handle rate limiting: sleep for the server-requested duration then
@@ -60,7 +93,9 @@ class SlackIngester:
                 "Slack rate limit hit on %s — waiting %ds before retry",
                 endpoint, retry_after,
             )
-            await asyncio.sleep(retry_after)
+            # Interruptible sleep so a Stop click during a 10–60s rate-limit
+            # wait actually breaks out instead of blocking for the full delay.
+            await self._interruptible_sleep(retry_after)
             raise RuntimeError(f"Rate limited [{endpoint}] — retrying")
 
         resp.raise_for_status()
@@ -200,6 +235,9 @@ class SlackIngester:
 
             try:
                 data = await self._get("conversations.history", params)
+            except CancelledError:
+                logger.info("conversations.history cancelled for %s", channel_id)
+                return
             except RuntimeError as e:
                 err = str(e).lower()
                 if any(kw in err for kw in ("not_in_channel", "channel_not_found")):
@@ -240,6 +278,9 @@ class SlackIngester:
 
             try:
                 data = await self._get("conversations.replies", params)
+            except CancelledError:
+                logger.info("conversations.replies cancelled for %s", channel_id)
+                return
             except RuntimeError as e:
                 if "thread_not_found" in str(e):
                     return
@@ -537,8 +578,19 @@ class SlackIngester:
         unresolved_bot_names: list[str] = []
         threads_fetched = 0  # count for inter-thread delay pacing
 
+        # Wire the cancel callable into HTTP/sleep layer so rate-limit waits
+        # and pre-request checks honour Stop without finishing every retry.
+        self._cancel_check = cancel_check
+
         # ── Pre-load existing message timestamps for fast in-memory dedup ────
-        existing_ts_map = await self._load_existing_ts(db, channel_id, oldest_ts, latest_ts)
+        # Static lookups — wrap in no_autoflush so SQLAlchemy doesn't try to
+        # batch-flush every queued INSERT before each SELECT. Without this,
+        # autoflush builds up to hundreds of pending rows (~2KB JSON each)
+        # and trips Supabase's statement_timeout on a single giant INSERT.
+        with db.no_autoflush:
+            existing_ts_map = await self._load_existing_ts(
+                db, channel_id, oldest_ts, latest_ts
+            )
         logger.info(
             "Pre-loaded %d existing message(s) for #%s", len(existing_ts_map), channel_name,
         )
@@ -547,13 +599,24 @@ class SlackIngester:
         # every other team member's bot messages in standup channels.
         target_names: set[str] | None = None
         if filter_user_id and is_standup:
-            target_names = await self._get_names_for_user(db, filter_user_id)
+            with db.no_autoflush:
+                target_names = await self._get_names_for_user(db, filter_user_id)
             logger.info(
                 "Standup name filter for user %s in #%s: %s",
                 filter_user_id, channel_name, target_names,
             )
 
         _cancelled = False
+        # Periodic flush threshold: keep INSERT batches small so a single
+        # commit-time flush never times out on Supabase.
+        FLUSH_EVERY = 25
+        pending_since_flush = 0
+
+        async def _maybe_flush() -> None:
+            nonlocal pending_since_flush
+            if pending_since_flush >= FLUSH_EVERY:
+                await db.flush()
+                pending_since_flush = 0
 
         async for msg in self.iter_channel_messages(channel_id, oldest=oldest_ts, latest=latest_ts):
             # Check for cancellation every message
@@ -572,12 +635,16 @@ class SlackIngester:
             # ── Helper: fetch thread replies with rate-limit pacing ──────────
             async def _fetch_thread(parent_ts: str):
                 nonlocal threads_fetched
+                if cancel_check and cancel_check():
+                    return []
                 # Pace thread fetches: 0.4s gap keeps us under Tier 3 (50 req/min)
                 threads_fetched += 1
                 if threads_fetched % 3 == 0:
                     await asyncio.sleep(0.4)
                 replies = []
                 async for reply in self.iter_thread_replies(channel_id, parent_ts, oldest_ts):
+                    if cancel_check and cancel_check():
+                        return replies
                     replies.append(reply)
                 return replies
 
@@ -591,7 +658,8 @@ class SlackIngester:
                     if target_names is not None and bot_username.lower() not in target_names:
                         resolved_uid = None
                     else:
-                        resolved_uid = await self._resolve_user_by_name(db, bot_username)
+                        with db.no_autoflush:
+                            resolved_uid = await self._resolve_user_by_name(db, bot_username)
                     logger.info(
                         "Standup bot message in #%s: username=%r → resolved_uid=%s "
                         "(filter_user_id=%s)",
@@ -609,6 +677,8 @@ class SlackIngester:
                             existing_ts_map=existing_ts_map,
                         ):
                             saved += 1
+                            pending_since_flush += 1
+                            await _maybe_flush()
                     elif resolved_uid is None and filter_user_id is None:
                         if bot_username not in unresolved_bot_names:
                             unresolved_bot_names.append(bot_username)
@@ -631,7 +701,8 @@ class SlackIngester:
                                 if target_names is not None and r_bot_username.lower() not in target_names:
                                     r_resolved = None
                                 else:
-                                    r_resolved = await self._resolve_user_by_name(db, r_bot_username)
+                                    with db.no_autoflush:
+                                        r_resolved = await self._resolve_user_by_name(db, r_bot_username)
                                 logger.info(
                                     "Standup thread reply in #%s: username=%r → resolved=%s",
                                     channel_name, r_bot_username, r_resolved,
@@ -648,6 +719,8 @@ class SlackIngester:
                                         existing_ts_map=existing_ts_map,
                                     ):
                                         saved += 1
+                                        pending_since_flush += 1
+                                        await _maybe_flush()
                                 elif r_resolved is None and filter_user_id is None:
                                     if r_bot_username not in unresolved_bot_names:
                                         unresolved_bot_names.append(r_bot_username)
@@ -665,6 +738,8 @@ class SlackIngester:
                                 existing_ts_map=existing_ts_map,
                             ):
                                 saved += 1
+                                pending_since_flush += 1
+                                await _maybe_flush()
                 continue
 
             # ── Regular user messages ────────────────────────────────────────
@@ -683,6 +758,8 @@ class SlackIngester:
                         existing_ts_map=existing_ts_map,
                     ):
                         saved += 1
+                        pending_since_flush += 1
+                        await _maybe_flush()
 
             # Fetch thread replies for messages that have them
             if msg.get("reply_count", 0) > 0:
@@ -713,7 +790,8 @@ class SlackIngester:
                             if target_names is not None and bot_username.lower() not in target_names:
                                 resolved_uid = None
                             else:
-                                resolved_uid = await self._resolve_user_by_name(db, bot_username)
+                                with db.no_autoflush:
+                                    resolved_uid = await self._resolve_user_by_name(db, bot_username)
                             uid_matches = (
                                 resolved_uid is not None
                                 and (filter_user_id is None or resolved_uid == filter_user_id)
@@ -726,6 +804,8 @@ class SlackIngester:
                                     existing_ts_map=existing_ts_map,
                                 ):
                                     saved += 1
+                                    pending_since_flush += 1
+                                    await _maybe_flush()
                     elif not reply_subtype or reply_subtype not in {"bot_message"}:
                         if self._is_relevant(reply, filter_user_id):
                             reply_sender = reply.get("user", "")
@@ -741,8 +821,14 @@ class SlackIngester:
                                 existing_ts_map=existing_ts_map,
                             ):
                                 saved += 1
+                                pending_since_flush += 1
+                                await _maybe_flush()
 
-        await db.flush()
+        # Final flush of any leftovers below the FLUSH_EVERY threshold.
+        if pending_since_flush:
+            await db.flush()
+        # Clear cancel hook so the ingester can be safely reused.
+        self._cancel_check = None
         logger.info(
             "Backfilled %d messages from #%s (unresolved bot names: %s)",
             saved, channel_name, unresolved_bot_names or "none",

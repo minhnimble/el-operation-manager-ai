@@ -212,6 +212,8 @@ async def _sync_slack_channel(
     unresolved_bot_names — standup bot usernames that couldn't be matched to any user.
     cancel_check      — callable returning True to abort mid-channel.
     """
+    from app.ingestion.slack_ingester import CancelledError as _SlackCancelled
+
     async with AsyncSessionLocal() as db:
         ingester = SlackIngester(user_token=access_token, team_id=team_id)
         try:
@@ -233,6 +235,13 @@ async def _sync_slack_channel(
                 count, unresolved = int(result), []
             await db.commit()
             return count, None, unresolved
+        except _SlackCancelled:
+            # User-requested stop: commit any flushed work and return cleanly.
+            try:
+                await db.commit()
+            except Exception:
+                await db.rollback()
+            return 0, None, []
         except Exception as e:
             await db.rollback()
             return 0, str(e), []
@@ -598,7 +607,14 @@ def _run_slack_sync_bg(
                         f"#{ch_name} ({ch_idx + 1}/{len(channels)})"
                     )
                     _jlog(job, f"  📥 #{ch_name}")
-                    mf = None if is_self_m else target_user_id
+                    # In standup mode, always pass the target user as the filter — even
+                    # for self — so backfill_channel can use its `target_names`
+                    # optimization and skip resolving every other team member's bot
+                    # username (chuu, tung nguyen, vo minh don, …) inside the channel.
+                    if slack_sync_mode == "standup":
+                        mf = target_user_id
+                    else:
+                        mf = None if is_self_m else target_user_id
                     count, err, unresolved = _run(_sync_slack_channel(
                         access_token, slack_team_id, slack_user_id,
                         ch_id, ch_name, oldest, latest=latest,
