@@ -130,8 +130,13 @@ async def _get_team_options(manager_user_id: str, manager_team_id: str, self_nam
 
 async def _get_github_links_batch(
     slack_user_ids: list[str], slack_team_id: str,
-) -> dict[str, tuple[bool, str]]:
-    """Batch-fetch GitHub link info for multiple users in a single query."""
+) -> dict[str, tuple[bool, str, bool]]:
+    """Batch-fetch GitHub link info for multiple users in a single query.
+
+    Returns {slack_user_id: (can_sync, github_login, uses_own_token)}.
+    can_sync is True when the member has either their own token OR a github_login
+    set (so the manager's token can be used as a proxy).
+    """
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(
@@ -143,12 +148,17 @@ async def _get_github_links_batch(
                 UserGitHubLink.slack_team_id == slack_team_id,
             )
         )
-        links = {
-            row.slack_user_id: (bool(row.github_access_token), row.github_login or "")
-            for row in result.all()
-        }
-    # Fill in missing users (no GitHub link)
-    return {uid: links.get(uid, (False, "")) for uid in slack_user_ids}
+        links = {}
+        for row in result.all():
+            has_token = bool(row.github_access_token)
+            has_login = bool(row.github_login)
+            links[row.slack_user_id] = (
+                has_token or has_login,  # can_sync
+                row.github_login or "",
+                has_token,               # uses_own_token
+            )
+    # Fill in missing users (no GitHub link at all)
+    return {uid: links.get(uid, (False, "", False)) for uid in slack_user_ids}
 
 
 def _load_sync_page_data(
@@ -466,8 +476,19 @@ async def _delete_ignored_channel_data(
 
 # ── GitHub helpers (one asyncio.run() per step) ───────────────────────────────
 
-async def _get_github_credentials(slack_user_id: str, slack_team_id: str) -> tuple[str, str]:
-    """Returns (access_token, github_login), or raises."""
+async def _get_github_credentials(
+    slack_user_id: str,
+    slack_team_id: str,
+    manager_user_id: str | None = None,
+) -> tuple[str, str]:
+    """Returns (access_token, github_login), or raises.
+
+    Resolution order:
+    1. Member's own GitHub OAuth token (ideal — uses their own access).
+    2. Manager's GitHub OAuth token + member's manually-set github_login.
+       Lets the EM sync teammates who haven't connected GitHub themselves,
+       as long as the member's GitHub handle is set in Team Overview.
+    """
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(UserGitHubLink).where(
@@ -476,16 +497,38 @@ async def _get_github_credentials(slack_user_id: str, slack_team_id: str) -> tup
             )
         )
         link = result.scalar_one_or_none()
-        if not link or not link.github_access_token:
-            raise RuntimeError(
-                "No GitHub OAuth token found for this user. "
-                "They need to connect their GitHub account on the Connect Accounts page."
+
+        # ── Case 1: member has their own token ────────────────────────────────
+        if link and link.github_access_token and link.github_login:
+            return link.github_access_token, link.github_login
+
+        # ── Case 2: member has a handle but no token → use manager's token ───
+        member_login = link.github_login if link else None
+        if member_login and manager_user_id and manager_user_id != slack_user_id:
+            mgr_result = await db.execute(
+                select(UserGitHubLink).where(
+                    UserGitHubLink.slack_user_id == manager_user_id,
+                    UserGitHubLink.slack_team_id == slack_team_id,
+                )
             )
-        return link.github_access_token, link.github_login
+            mgr_link = mgr_result.scalar_one_or_none()
+            if mgr_link and mgr_link.github_access_token:
+                return mgr_link.github_access_token, member_login
+
+        raise RuntimeError(
+            "No GitHub token available. "
+            "Either the member needs to connect their GitHub account, "
+            "or set their GitHub handle in Team Overview and connect your own GitHub account."
+        )
 
 
-async def _get_github_link_info(slack_user_id: str, slack_team_id: str) -> tuple[bool, str]:
-    """Returns (has_token, github_login) for display purposes."""
+async def _get_github_link_info(slack_user_id: str, slack_team_id: str) -> tuple[bool, str, bool]:
+    """Returns (can_sync, github_login, uses_own_token).
+
+    can_sync     — True if we have enough info to sync (own token OR handle set)
+    github_login — the GitHub handle, empty string if unknown
+    uses_own_token — True when the member's own OAuth token will be used
+    """
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(UserGitHubLink).where(
@@ -494,9 +537,12 @@ async def _get_github_link_info(slack_user_id: str, slack_team_id: str) -> tuple
             )
         )
         link = result.scalar_one_or_none()
-        if not link or not link.github_access_token:
-            return False, ""
-        return True, link.github_login or ""
+        if not link:
+            return False, "", False
+        has_token = bool(link.github_access_token)
+        has_login = bool(link.github_login)
+        can_sync  = has_token or has_login
+        return can_sync, link.github_login or "", has_token
 
 
 async def _get_github_repos(access_token: str, github_login: str) -> list[dict]:
@@ -767,6 +813,7 @@ def _run_github_sync_bg(
     gh_info: dict,
     since: "datetime",
     my_gen: int,
+    manager_user_id: str | None = None,
 ) -> None:
     """Runs in a daemon thread — updates `job` dict with live progress.
 
@@ -804,7 +851,9 @@ def _run_github_sync_bg(
             _jlog(job, f"\n👤 **{member_name}** (@{gh_login_d})")
 
             try:
-                gh_token, github_login = _run(_get_github_credentials(target_user_id, slack_team_id))
+                gh_token, github_login = _run(_get_github_credentials(
+                    target_user_id, slack_team_id, manager_user_id=manager_user_id,
+                ))
                 _jlog(job, f"  📋 Loading repos for @{github_login}…")
                 repos = _run(_get_github_repos(gh_token, github_login))
                 _jlog(job, f"  Found {len(repos)} repo(s).")
@@ -1139,10 +1188,17 @@ st.markdown("---")
 
 st.subheader("GitHub")
 
-# Check GitHub connectivity for every selected member (from cache — no DB call)
-gh_info: dict[str, tuple[bool, str]] = {
-    name: _gh_links_by_name.get(name, (False, "")) for name, _uid in target_users
+# Check GitHub connectivity for every selected member (from cache — no DB call).
+# gh_info value: (can_sync, github_login, uses_own_token)
+gh_info: dict[str, tuple[bool, str, bool]] = {
+    name: _gh_links_by_name.get(name, (False, "", False)) for name, _uid in target_users
 }
+
+# Check if the manager (logged-in user) has a GitHub token for proxy use
+_manager_has_gh_token = gh_info.get(
+    next((n for n, u in target_users if u == slack_user_id), ""),
+    (False, "", False)
+)[2]
 
 members_with_gh = [(n, u) for n, u in target_users if gh_info[n][0]]
 members_no_gh   = [(n, u) for n, u in target_users if not gh_info[n][0]]
@@ -1150,16 +1206,30 @@ members_no_gh   = [(n, u) for n, u in target_users if not gh_info[n][0]]
 if members_no_gh:
     skipped_str = ", ".join(f"**{n}**" for n, _ in members_no_gh)
     if members_with_gh:
-        st.warning(f"⚠️ No GitHub token — will skip: {skipped_str}")
+        st.warning(f"⚠️ No GitHub handle set — will skip: {skipped_str}")
     else:
-        st.warning(f"None of the selected members have connected GitHub: {skipped_str}")
-        if any(u == slack_user_id for _, u in target_users):
-            st.page_link("pages/1_Connect.py", label="Connect GitHub on the Connect Accounts page")
+        st.warning(f"None of the selected members have a GitHub handle set: {skipped_str}")
+        st.caption("Set each member's GitHub handle in **Team Overview** to enable sync using your token.")
         st.button("Sync GitHub", type="primary", disabled=True)
 
 if members_with_gh:
-    gh_list = ", ".join(f"**{n}** (@{gh_info[n][1]})" for n, _ in members_with_gh)
-    st.caption(f"Will sync: {gh_list}")
+    # Show which token will be used for each member
+    _sync_labels = []
+    for n, _ in members_with_gh:
+        login = gh_info[n][1]
+        own_token = gh_info[n][2]
+        if own_token:
+            _sync_labels.append(f"**{n}** (@{login} — own token)")
+        else:
+            _sync_labels.append(f"**{n}** (@{login} — via your token)")
+    st.caption("Will sync: " + ", ".join(_sync_labels))
+
+    if not _manager_has_gh_token and any(not gh_info[n][2] for n, _ in members_with_gh):
+        st.warning(
+            "⚠️ Some members will use your GitHub token as a proxy, "
+            "but you haven't connected your GitHub account yet. "
+            "Go to **Connect Accounts** to link your GitHub."
+        )
 
     if st.button("Sync GitHub", type="primary"):
         # Bump the GitHub gen counter — supersedes any older daemon thread.
@@ -1169,7 +1239,8 @@ if members_with_gh:
         st.session_state["_github_sync_job"] = job
         threading.Thread(
             target=_run_github_sync_bg,
-            args=(job, slack_team_id, members_with_gh, gh_info, sync_start, my_gh_gen),
+            args=(job, slack_team_id, members_with_gh, gh_info, sync_start,
+                  my_gh_gen, slack_user_id),
             daemon=True,
         ).start()
         st.rerun()
