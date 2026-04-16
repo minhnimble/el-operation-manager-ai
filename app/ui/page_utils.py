@@ -16,7 +16,16 @@ Usage at the top of every page (after st.set_page_config):
 from __future__ import annotations
 
 import contextlib
+
+import nest_asyncio
 import streamlit as st
+
+# Allow asyncio.run() inside Streamlit's own event loop on every page.
+# Streamlit Cloud runs an event loop in the main thread; without this,
+# calling asyncio.run() from a page script raises "cannot run nested
+# event loop" and causes DuplicatePreparedStatementError with asyncpg
+# when the module-level engine is accessed from an unexpected loop context.
+nest_asyncio.apply()
 
 
 # ── Animated top-bar + skeleton CSS ──────────────────────────────────────────
