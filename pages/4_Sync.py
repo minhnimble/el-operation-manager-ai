@@ -433,6 +433,7 @@ def _make_job(label: str) -> dict:
     return {
         "label": label,
         "running": True,
+        "stop_requested": False,  # set by UI Stop button; checked by bg thread
         "log": [],               # list of (level, msg); level: "info"|"warn"|"error"|"ok"
         "progress": 0,
         "progress_text": "Starting…",
@@ -484,7 +485,13 @@ def _run_slack_sync_bg(
                 return
 
         total_members = len(target_users)
+        stopped = False
         for idx, (member_name, target_user_id) in enumerate(target_users):
+            if job.get("stop_requested"):
+                _jlog(job, "\n🛑 Stop requested — aborting remaining members.", "warn")
+                stopped = True
+                break
+
             is_self_m = target_user_id == slack_user_id
             job["progress"] = int(idx / total_members * 94)
             job["progress_text"] = f"Member {idx + 1}/{total_members}: {member_name}…"
@@ -514,6 +521,11 @@ def _run_slack_sync_bg(
 
                 n_ch = max(len(channels), 1)
                 for ch_idx, ch in enumerate(channels):
+                    if job.get("stop_requested"):
+                        _jlog(job, "  🛑 Stop requested — skipping remaining channels.", "warn")
+                        stopped = True
+                        break
+
                     ch_id   = ch["id"]
                     ch_name = ch.get("name", ch_id)
                     # Per-channel progress: interpolate within this member's slice
@@ -542,8 +554,12 @@ def _run_slack_sync_bg(
 
                 grand_msgs += total_msgs
                 all_errors.extend(member_errors)
-                ms["status"] = "✅" if not member_errors else "⚠️"
-                ms["detail"] = f"{total_msgs} msgs" + (f" · {len(member_errors)} err" if member_errors else "")
+                if stopped:
+                    ms["status"] = "🛑"
+                    ms["detail"] = f"{total_msgs} msgs (stopped)"
+                else:
+                    ms["status"] = "✅" if not member_errors else "⚠️"
+                    ms["detail"] = f"{total_msgs} msgs" + (f" · {len(member_errors)} err" if member_errors else "")
 
             except Exception as e:
                 member_errors.append(str(e))
@@ -558,15 +574,16 @@ def _run_slack_sync_bg(
         _jlog(job, f"  ✓ {normalized} work unit(s)")
 
         job["progress"] = 100
-        job["progress_text"] = "Done ✓"
+        job["progress_text"] = "Done ✓" if not stopped else "Stopped ■"
         mode_label = "normal messages" if slack_sync_mode == "normal" else "daily standup"
+        stop_note = " (stopped early by user)" if stopped else ""
         job["summary"] = (
-            f"✅ Slack sync complete ({mode_label}) — "
+            f"{'⚠️' if stopped else '✅'} Slack sync {'stopped' if stopped else 'complete'} ({mode_label}){stop_note} — "
             f"**{grand_msgs}** new message(s), **{normalized}** work unit(s) "
             f"across **{len(target_users)}** member(s)"
             + (f" · {len(all_errors)} error(s)" if all_errors else "")
         )
-        _jlog(job, job["summary"], "ok")
+        _jlog(job, job["summary"], "warn" if stopped else "ok")
 
     except Exception as e:
         job["summary"] = f"❌ Slack sync failed: {e}"
@@ -591,7 +608,13 @@ def _run_github_sync_bg(
         grand: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
 
         total_members = len(members_with_gh)
+        stopped = False
         for idx, (member_name, target_user_id) in enumerate(members_with_gh):
+            if job.get("stop_requested"):
+                _jlog(job, "\n🛑 Stop requested — aborting remaining members.", "warn")
+                stopped = True
+                break
+
             gh_login_d = gh_info[member_name][1]
             job["progress"] = int(idx / total_members * 94)
             job["progress_text"] = f"Member {idx + 1}/{total_members}: {member_name}…"
@@ -609,6 +632,11 @@ def _run_github_sync_bg(
                 tc: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
                 n_repos = max(len(repos), 1)
                 for r_idx, repo in enumerate(repos):
+                    if job.get("stop_requested"):
+                        _jlog(job, "  🛑 Stop requested — skipping remaining repos.", "warn")
+                        stopped = True
+                        break
+
                     repo_name = repo["full_name"]
                     # Per-repo progress: interpolate within this member's slice
                     frac = (idx + r_idx / n_repos) / total_members
@@ -634,8 +662,12 @@ def _run_github_sync_bg(
                         _jlog(job, f"    ⚠️ {e}", "warn")
 
                 member_summary = ", ".join(f"{v} {k}" for k, v in tc.items() if v) or "nothing new"
-                ms["status"] = "✅"
-                ms["detail"] = member_summary
+                if stopped:
+                    ms["status"] = "🛑"
+                    ms["detail"] = f"{member_summary} (stopped)"
+                else:
+                    ms["status"] = "✅"
+                    ms["detail"] = member_summary
                 _jlog(job, f"  → {member_summary}")
 
             except Exception as e:
@@ -650,13 +682,15 @@ def _run_github_sync_bg(
         _jlog(job, f"  ✓ {normalized} work unit(s)")
 
         job["progress"] = 100
-        job["progress_text"] = "Done ✓"
+        job["progress_text"] = "Done ✓" if not stopped else "Stopped ■"
         grand_summary = ", ".join(f"{v} {k}" for k, v in grand.items() if v) or "nothing new"
+        stop_note = " (stopped early by user)" if stopped else ""
         job["summary"] = (
-            f"✅ GitHub sync complete — {grand_summary}, **{normalized}** work unit(s) "
+            f"{'⚠️' if stopped else '✅'} GitHub sync {'stopped' if stopped else 'complete'}{stop_note} — "
+            f"{grand_summary}, **{normalized}** work unit(s) "
             f"across **{len(members_with_gh)}** member(s)"
         )
-        _jlog(job, job["summary"], "ok")
+        _jlog(job, job["summary"], "warn" if stopped else "ok")
 
     except Exception as e:
         job["summary"] = f"❌ GitHub sync failed: {e}"
@@ -687,12 +721,18 @@ def _render_job_ui(job: dict, state_key: str) -> None:
         key=f"_log_area_{state_key}_{len(log_lines)}",
     )
 
-    if not job["running"]:
+    if job["running"]:
+        # Show Stop button while sync is in progress
+        if job.get("stop_requested"):
+            st.warning("⏳ Stopping after the current channel/repo finishes…")
+        elif st.button("⏹ Stop sync", key=f"_stop_{state_key}", type="secondary"):
+            job["stop_requested"] = True
+    else:
         summary = job.get("summary", "")
         if "✅" in summary:
             st.success(summary)
         elif summary:
-            st.error(summary)
+            st.warning(summary) if "⚠️" in summary else st.error(summary)
         if st.button("Clear", key=f"_clear_{state_key}"):
             st.session_state.pop(state_key, None)
             st.rerun()
@@ -800,7 +840,7 @@ if _date_mode == "Last N days":
             "Or enter days", min_value=1, max_value=3650, value=_days,
             key="days_input", label_visibility="visible",
         )
-    sync_start: datetime = datetime.utcnow() - timedelta(days=_days)
+    sync_start: datetime = datetime.now(tz=None) - timedelta(days=_days)
     sync_end: datetime | None = None
     st.caption(f"From **{sync_start.strftime('%b %d, %Y')}** to **now**.")
 else:

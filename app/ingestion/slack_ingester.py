@@ -385,6 +385,31 @@ class SlackIngester:
         text = msg.get("text", "")
         return f"<@{user_id}>" in text or f"<@{user_id}|" in text
 
+    # ── Batch dedup helpers ─────────────────────────────────────────────────────
+
+    async def _load_existing_ts(
+        self,
+        db: AsyncSession,
+        channel_id: str,
+        oldest_ts: float | None,
+        latest_ts: float | None,
+    ) -> dict[str, str]:
+        """Pre-load {message_ts: slack_user_id} for a channel in the time range.
+
+        This replaces per-message SELECT queries with a single bulk query,
+        reducing DB round-trips from O(messages) to O(1).
+        """
+        stmt = select(
+            SlackMessage.message_ts,
+            SlackMessage.slack_user_id,
+        ).where(SlackMessage.channel_id == channel_id)
+        if oldest_ts:
+            stmt = stmt.where(SlackMessage.timestamp >= datetime.utcfromtimestamp(oldest_ts))
+        if latest_ts:
+            stmt = stmt.where(SlackMessage.timestamp <= datetime.utcfromtimestamp(latest_ts))
+        result = await db.execute(stmt)
+        return {row.message_ts: row.slack_user_id for row in result.all()}
+
     # ── Message persistence ────────────────────────────────────────────────────
 
     async def _save_message(
@@ -396,11 +421,15 @@ class SlackIngester:
         is_standup: bool,
         is_reply: bool,
         user_id: str | None = None,
+        existing_ts_map: dict[str, str] | None = None,
     ) -> bool:
         """Persist a single Slack message. Returns True if newly saved.
 
         `user_id` overrides msg['user'] — used when attributing bot-posted
         standup summaries to the real author via name resolution.
+
+        `existing_ts_map` is an optional pre-loaded {ts: user_id} dict for
+        fast in-memory dedup (avoids a DB SELECT per message).
         """
         uid = user_id or msg.get("user")
         if not uid:
@@ -410,31 +439,50 @@ class SlackIngester:
         if not ts:
             return False
 
-        existing = await db.execute(
-            select(SlackMessage).where(SlackMessage.message_ts == ts)
-        )
-        existing_record = existing.scalar_one_or_none()
-        if existing_record:
-            # If we have a user_id override and the existing record is under a
-            # different user, update it so the message appears in the right report.
-            if uid and existing_record.slack_user_id != uid:
+        # Fast in-memory dedup when a pre-loaded map is available
+        if existing_ts_map is not None and ts in existing_ts_map:
+            old_uid = existing_ts_map[ts]
+            if uid and old_uid != uid:
                 await db.execute(
                     update(SlackMessage)
                     .where(SlackMessage.message_ts == ts)
                     .values(slack_user_id=uid)
                 )
-                # Also fix any already-normalized WorkUnit so the report picks it up
                 from app.models.work_unit import WorkUnit
                 await db.execute(
                     update(WorkUnit)
                     .where(WorkUnit.slack_message_ts == ts)
                     .values(slack_user_id=uid)
                 )
-                logger.debug(
-                    "Re-attributed message %s from %s to %s",
-                    ts, existing_record.slack_user_id, uid,
-                )
+                existing_ts_map[ts] = uid
+                logger.debug("Re-attributed message %s from %s to %s", ts, old_uid, uid)
             return False
+
+        # Fallback: DB lookup (only for reply ts that may fall outside the
+        # pre-loaded range — shouldn't happen often)
+        if existing_ts_map is None:
+            existing = await db.execute(
+                select(SlackMessage).where(SlackMessage.message_ts == ts)
+            )
+            existing_record = existing.scalar_one_or_none()
+            if existing_record:
+                if uid and existing_record.slack_user_id != uid:
+                    await db.execute(
+                        update(SlackMessage)
+                        .where(SlackMessage.message_ts == ts)
+                        .values(slack_user_id=uid)
+                    )
+                    from app.models.work_unit import WorkUnit
+                    await db.execute(
+                        update(WorkUnit)
+                        .where(WorkUnit.slack_message_ts == ts)
+                        .values(slack_user_id=uid)
+                    )
+                    logger.debug(
+                        "Re-attributed message %s from %s to %s",
+                        ts, existing_record.slack_user_id, uid,
+                    )
+                return False
 
         thread_ts = msg.get("thread_ts")
         record = SlackMessage(
@@ -451,6 +499,9 @@ class SlackIngester:
             timestamp=datetime.utcfromtimestamp(float(ts)),
         )
         db.add(record)
+        # Track newly added ts so subsequent checks in the same run skip it
+        if existing_ts_map is not None:
+            existing_ts_map[ts] = uid
         return True
 
     async def backfill_channel(
@@ -483,10 +534,16 @@ class SlackIngester:
         latest_ts = latest.timestamp() if latest else None
         saved = 0
         unresolved_bot_names: list[str] = []
+        threads_fetched = 0  # count for inter-thread delay pacing
+
+        # ── Pre-load existing message timestamps for fast in-memory dedup ────
+        existing_ts_map = await self._load_existing_ts(db, channel_id, oldest_ts, latest_ts)
+        logger.info(
+            "Pre-loaded %d existing message(s) for #%s", len(existing_ts_map), channel_name,
+        )
 
         # Pre-load target user's known names so we can skip name resolution for
         # every other team member's bot messages in standup channels.
-        # When filter_user_id is None (EM syncing for self) we resolve everyone.
         target_names: set[str] | None = None
         if filter_user_id and is_standup:
             target_names = await self._get_names_for_user(db, filter_user_id)
@@ -503,6 +560,18 @@ class SlackIngester:
             if subtype in {"channel_join", "channel_leave", "channel_purpose"}:
                 continue
 
+            # ── Helper: fetch thread replies with rate-limit pacing ──────────
+            async def _fetch_thread(parent_ts: str):
+                nonlocal threads_fetched
+                # Pace thread fetches: 0.4s gap keeps us under Tier 3 (50 req/min)
+                threads_fetched += 1
+                if threads_fetched % 3 == 0:
+                    await asyncio.sleep(0.4)
+                replies = []
+                async for reply in self.iter_thread_replies(channel_id, parent_ts, oldest_ts):
+                    replies.append(reply)
+                return replies
+
             # ── Bot-posted standup summaries (Geekbot-style) ─────────────────
             if subtype == "bot_message" and is_standup:
                 bot_username = (
@@ -510,8 +579,6 @@ class SlackIngester:
                     or msg.get("user_profile", {}).get("display_name", "")
                 ).strip()
                 if bot_username:
-                    # Skip resolution entirely if target_names is set and this
-                    # username clearly belongs to someone else.
                     if target_names is not None and bot_username.lower() not in target_names:
                         resolved_uid = None
                     else:
@@ -521,9 +588,6 @@ class SlackIngester:
                         "(filter_user_id=%s)",
                         channel_name, bot_username, resolved_uid, filter_user_id,
                     )
-                    # For bot standup messages the ONLY valid check is whether the
-                    # name resolves to the target user — mentions don't apply here
-                    # (we don't want Alice's standup just because it mentions Don).
                     uid_matches = (
                         resolved_uid is not None
                         and (filter_user_id is None or resolved_uid == filter_user_id)
@@ -533,23 +597,23 @@ class SlackIngester:
                             db, msg, channel_id, channel_name,
                             is_standup=True, is_reply=False,
                             user_id=resolved_uid,
+                            existing_ts_map=existing_ts_map,
                         ):
                             saved += 1
                     elif resolved_uid is None and filter_user_id is None:
-                        # Only warn about unresolved names when syncing for self
-                        # (no filter). When syncing a specific member we only care
-                        # that their own entry is captured — other names are noise.
                         if bot_username not in unresolved_bot_names:
                             unresolved_bot_names.append(bot_username)
                 if msg.get("reply_count", 0) > 0:
-                    async for reply in self.iter_thread_replies(channel_id, ts, oldest_ts):
+                    # Skip thread fetch if parent was already synced and we're
+                    # not looking for new replies (parent ts in existing map).
+                    if ts in existing_ts_map and filter_user_id is not None:
+                        continue
+                    for reply in await _fetch_thread(ts):
                         rsubtype = reply.get("subtype", "")
                         if rsubtype in {"channel_join", "channel_leave"}:
                             continue
 
                         if rsubtype == "bot_message":
-                            # Bot-posted standup reply (e.g. Nimble Bot posts each
-                            # member's answer in-thread with username = their name).
                             r_bot_username = (
                                 reply.get("username")
                                 or reply.get("user_profile", {}).get("display_name", "")
@@ -572,13 +636,13 @@ class SlackIngester:
                                         db, reply, channel_id, channel_name,
                                         is_standup=True, is_reply=True,
                                         user_id=r_resolved,
+                                        existing_ts_map=existing_ts_map,
                                     ):
                                         saved += 1
                                 elif r_resolved is None and filter_user_id is None:
                                     if r_bot_username not in unresolved_bot_names:
                                         unresolved_bot_names.append(r_bot_username)
                         elif self._is_relevant(reply, filter_user_id):
-                            # Regular user reply in thread — capture if relevant
                             reply_sender = reply.get("user", "")
                             reply_override = (
                                 filter_user_id
@@ -589,6 +653,7 @@ class SlackIngester:
                                 db, reply, channel_id, channel_name,
                                 is_standup=is_standup, is_reply=True,
                                 user_id=reply_override,
+                                existing_ts_map=existing_ts_map,
                             ):
                                 saved += 1
                 continue
@@ -596,7 +661,6 @@ class SlackIngester:
             # ── Regular user messages ────────────────────────────────────────
             if subtype not in {"bot_message"}:
                 if self._is_relevant(msg, filter_user_id):
-                    # Attribute to filter_user_id if relevant only due to mention
                     sender = msg.get("user", "")
                     override_uid = (
                         filter_user_id
@@ -607,12 +671,27 @@ class SlackIngester:
                         db, msg, channel_id, channel_name,
                         is_standup=is_standup, is_reply=False,
                         user_id=override_uid,
+                        existing_ts_map=existing_ts_map,
                     ):
                         saved += 1
 
-            # Fetch thread replies for any message that has them
+            # Fetch thread replies for messages that have them
             if msg.get("reply_count", 0) > 0:
-                async for reply in self.iter_thread_replies(channel_id, ts, oldest_ts):
+                # OPTIMISATION: skip thread fetch when parent is already in DB
+                # AND we're syncing a specific member (re-sync won't find new
+                # replies relevant to that member in practice).
+                if ts in existing_ts_map and filter_user_id is not None:
+                    continue
+                # OPTIMISATION: for non-standup channels with filter, skip
+                # threads where the parent is irrelevant (not from/mentioning
+                # the target user) — replies are unlikely to be relevant either.
+                if (
+                    filter_user_id is not None
+                    and not is_standup
+                    and not self._is_relevant(msg, filter_user_id)
+                ):
+                    continue
+                for reply in await _fetch_thread(ts):
                     if reply.get("subtype", "") in {"channel_join", "channel_leave"}:
                         continue
                     reply_subtype = reply.get("subtype", "")
@@ -635,11 +714,11 @@ class SlackIngester:
                                     db, reply, channel_id, channel_name,
                                     is_standup=True, is_reply=True,
                                     user_id=resolved_uid,
+                                    existing_ts_map=existing_ts_map,
                                 ):
                                     saved += 1
                     elif not reply_subtype or reply_subtype not in {"bot_message"}:
                         if self._is_relevant(reply, filter_user_id):
-                            # Attribute to filter_user_id if relevant only due to mention
                             reply_sender = reply.get("user", "")
                             reply_override = (
                                 filter_user_id
@@ -650,6 +729,7 @@ class SlackIngester:
                                 db, reply, channel_id, channel_name,
                                 is_standup=is_standup, is_reply=True,
                                 user_id=reply_override,
+                                existing_ts_map=existing_ts_map,
                             ):
                                 saved += 1
 
