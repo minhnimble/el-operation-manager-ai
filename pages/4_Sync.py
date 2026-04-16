@@ -8,8 +8,8 @@ each sync into small asyncio.run() steps so the UI can update between them.
 Slack sync uses the EM's own token and captures messages from every author
 in every joined channel — no member selector needed for Slack.
 
-GitHub sync targets a specific team member: the selected user must have
-connected their own GitHub account via OAuth for the sync to work.
+GitHub sync targets a specific team member and resolves credentials in order:
+member OAuth token first, then manager OAuth token + manually-set github_login.
 """
 
 import asyncio
@@ -167,15 +167,15 @@ async def _get_github_links_batch(
         missing = [uid for uid in slack_user_ids if uid not in links]
         if missing:
             tm_result = await db.execute(
-                select(TeamMember.slack_user_id, TeamMember.github_login).where(
-                    TeamMember.slack_user_id.in_(missing),
-                    TeamMember.slack_team_id == slack_team_id,
+                select(TeamMember.member_slack_user_id, TeamMember.github_login).where(
+                    TeamMember.member_slack_user_id.in_(missing),
+                    TeamMember.manager_slack_team_id == slack_team_id,
                     TeamMember.github_login.isnot(None),
                     TeamMember.github_login != "",
                 )
             )
             for row in tm_result.all():
-                links[row.slack_user_id] = (
+                links[row.member_slack_user_id] = (
                     True,               # can_sync (manager's token will be used)
                     row.github_login,
                     False,              # uses_own_token
@@ -508,10 +508,10 @@ async def _get_github_credentials(
     """Returns (access_token, github_login), or raises.
 
     Resolution order:
-    1. Member's own GitHub OAuth token (ideal — uses their own access).
-    2. Manager's GitHub OAuth token + member's manually-set github_login.
-       Lets the EM sync teammates who haven't connected GitHub themselves,
-       as long as the member's GitHub handle is set in Team Overview.
+    1. Manager's GitHub OAuth token (app/global token) + member github_login.
+       Preferred path so all syncs run with the app/manager token.
+    2. Member's own GitHub OAuth token + member github_login.
+       Fallback when manager token is unavailable.
     """
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -522,13 +522,21 @@ async def _get_github_credentials(
         )
         link = result.scalar_one_or_none()
 
-        # ── Case 1: member has their own token ────────────────────────────────
-        if link and link.github_access_token and link.github_login:
-            return link.github_access_token, link.github_login
-
-        # ── Case 2: member has a handle but no token → use manager's token ───
+        # Member GitHub login can come from OAuth link or TeamMember mapping.
         member_login = link.github_login if link else None
-        if member_login and manager_user_id and manager_user_id != slack_user_id:
+        if not member_login:
+            tm_result = await db.execute(
+                select(TeamMember.github_login).where(
+                    TeamMember.member_slack_user_id == slack_user_id,
+                    TeamMember.manager_slack_team_id == slack_team_id,
+                    TeamMember.github_login.isnot(None),
+                    TeamMember.github_login != "",
+                )
+            )
+            member_login = tm_result.scalar_one_or_none()
+
+        # ── Case 1: prefer manager/app token ─────────────────────────────────
+        if member_login and manager_user_id:
             mgr_result = await db.execute(
                 select(UserGitHubLink).where(
                     UserGitHubLink.slack_user_id == manager_user_id,
@@ -539,10 +547,14 @@ async def _get_github_credentials(
             if mgr_link and mgr_link.github_access_token:
                 return mgr_link.github_access_token, member_login
 
+        # ── Case 2: fallback to member token ─────────────────────────────────
+        if link and link.github_access_token and link.github_login:
+            return link.github_access_token, link.github_login
+
         raise RuntimeError(
             "No GitHub token available. "
-            "Either the member needs to connect their GitHub account, "
-            "or set their GitHub handle in Team Overview and connect your own GitHub account."
+            "Connect your GitHub account first (app/global manager token), "
+            "or have the member connect their own GitHub account."
         )
 
 
@@ -561,12 +573,25 @@ async def _get_github_link_info(slack_user_id: str, slack_team_id: str) -> tuple
             )
         )
         link = result.scalar_one_or_none()
-        if not link:
-            return False, "", False
-        has_token = bool(link.github_access_token)
-        has_login = bool(link.github_login)
-        can_sync  = has_token or has_login
-        return can_sync, link.github_login or "", has_token
+        if link:
+            has_token = bool(link.github_access_token)
+            has_login = bool(link.github_login)
+            can_sync = has_token or has_login
+            if can_sync:
+                return can_sync, link.github_login or "", has_token
+
+        tm_result = await db.execute(
+            select(TeamMember.github_login).where(
+                TeamMember.member_slack_user_id == slack_user_id,
+                TeamMember.manager_slack_team_id == slack_team_id,
+                TeamMember.github_login.isnot(None),
+                TeamMember.github_login != "",
+            )
+        )
+        member_login = tm_result.scalar_one_or_none()
+        if member_login:
+            return True, member_login, False
+        return False, "", False
 
 
 async def _get_github_repos(access_token: str, github_login: str) -> list[dict]:
