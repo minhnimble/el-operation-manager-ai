@@ -27,7 +27,9 @@ from app.slack.users import list_workspace_users
 
 st.set_page_config(page_title="Team Overview", page_icon="👥", layout="wide")
 from app.ui.page_utils import inject_page_load_bar
+from app.ui.session_cookie import restore_session_from_cookie
 inject_page_load_bar()
+restore_session_from_cookie()
 
 
 def run(coro):

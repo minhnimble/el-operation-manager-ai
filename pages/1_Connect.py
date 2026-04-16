@@ -26,7 +26,9 @@ from app.slack.oauth import build_auth_url
 
 st.set_page_config(page_title="Connect Accounts", page_icon="🔗", layout="wide")
 from app.ui.page_utils import inject_page_load_bar
+from app.ui.session_cookie import restore_session_from_cookie, clear_session_cookie
 inject_page_load_bar()
+restore_session_from_cookie()
 settings = get_settings()
 
 
@@ -154,6 +156,7 @@ if slack_user_id:
         run(_disconnect_slack(slack_user_id, slack_team_id))
         for key in ("slack_user_id", "slack_team_id", "slack_display_name"):
             st.session_state.pop(key, None)
+        clear_session_cookie()
         st.rerun()
 
     state = secrets.token_urlsafe(12)

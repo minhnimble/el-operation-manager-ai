@@ -37,7 +37,9 @@ from app.normalization.normalizer import normalize_slack_messages, normalize_git
 
 st.set_page_config(page_title="Sync Data", page_icon="🔄", layout="wide")
 from app.ui.page_utils import inject_page_load_bar
+from app.ui.session_cookie import restore_session_from_cookie
 inject_page_load_bar()
+restore_session_from_cookie()
 
 # ── Channel ignore list ────────────────────────────────────────────────────────
 

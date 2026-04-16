@@ -123,10 +123,17 @@ GITHUB_CLIENT_SECRET = "..."
 ANTHROPIC_API_KEY = "sk-ant-..."
 ANTHROPIC_MODEL   = "claude-sonnet-4-6"
 
-APP_BASE_URL = "https://yourapp.streamlit.app"
+APP_BASE_URL    = "https://yourapp.streamlit.app"
+APP_SECRET_KEY  = "..."   # see note below
 
 ENABLE_AI_EXTRACTION = "true"
 ```
+
+> **`APP_SECRET_KEY`** signs the session cookie that keeps you logged in across page navigations and OAuth redirects. Generate one with:
+> ```bash
+> python -c "import secrets; print(secrets.token_hex(32))"
+> ```
+> Use the same key every deploy — changing it invalidates all existing sessions.
 
 Click **Reboot app** after saving.
 
@@ -206,11 +213,22 @@ pip3 install -r requirements.txt
 cp .env.example .env
 ```
 
-Fill in `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `ANTHROPIC_API_KEY`, and set:
+Fill in the required values:
 
 ```env
+APP_SECRET_KEY=<random string — run: python -c "import secrets; print(secrets.token_hex(32))">
 APP_BASE_URL=https://localhost:8501
+
+SLACK_CLIENT_ID=...
+SLACK_CLIENT_SECRET=...
+
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+
+ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+`APP_SECRET_KEY` signs the session cookie that persists your Slack login across page refreshes and OAuth redirects. Any non-empty value works locally; just keep it stable (don't regenerate on every run) or your session will reset each time you restart the app.
 
 > Config source priority: `st.secrets` (if present) → `.env` file.
 

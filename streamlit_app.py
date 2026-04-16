@@ -16,6 +16,8 @@ from app.streamlit_env import load_streamlit_secrets_into_env
 # Inject Streamlit Cloud secrets if available; fall back to local `.env`.
 load_streamlit_secrets_into_env()
 
+from app.ui.session_cookie import restore_session_from_cookie, set_session_cookie
+
 # Allow nested event loops — required for asyncio.run() inside Streamlit Cloud
 nest_asyncio.apply()
 
@@ -44,12 +46,16 @@ st.set_page_config(
 )
 from app.ui.page_utils import inject_page_load_bar
 inject_page_load_bar()
+# Also restore here so the home page nav reflects the logged-in state
 
 
 def run_async(coro):
     loop = asyncio.get_event_loop()
     return loop.run_until_complete(coro)
 
+
+# ─── Restore session from cookie (survives page reloads & OAuth redirects) ───
+restore_session_from_cookie()
 
 # ─── OAuth Callback Handler ───────────────────────────────────────────────────
 
@@ -82,6 +88,13 @@ if "code" in params:
                 st.session_state["slack_user_id"] = token.slack_user_id
                 st.session_state["slack_team_id"] = token.slack_team_id
                 st.session_state["slack_display_name"] = token.slack_display_name
+                # Persist identity in a signed cookie so it survives OAuth
+                # redirects, page refreshes, and tab close/reopen.
+                set_session_cookie(
+                    token.slack_user_id,
+                    token.slack_team_id,
+                    token.slack_display_name or "",
+                )
                 st.success(
                     f"✅ Signed in as **{token.slack_display_name}** "
                     f"(team: {token.slack_team_name})"
