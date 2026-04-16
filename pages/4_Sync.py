@@ -131,14 +131,19 @@ async def _get_team_options(manager_user_id: str, manager_team_id: str, self_nam
 async def _get_github_links_batch(
     slack_user_ids: list[str], slack_team_id: str,
 ) -> dict[str, tuple[bool, str, bool]]:
-    """Batch-fetch GitHub link info for multiple users in a single query.
+    """Batch-fetch GitHub link info for multiple users in two queries.
 
     Returns {slack_user_id: (can_sync, github_login, uses_own_token)}.
-    can_sync is True when the member has either their own token OR a github_login
-    set (so the manager's token can be used as a proxy).
+    can_sync is True when the member has either their own OAuth token OR a
+    github_login set manually (so the manager's token can be used as a proxy).
+
+    Resolution order:
+      1. UserGitHubLink (OAuth) — provides both token and login; uses_own_token=True
+      2. TeamMember.github_login (manual) — no token, uses manager's token
     """
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
+        # ── 1. OAuth-linked users ─────────────────────────────────────────────
+        oauth_result = await db.execute(
             select(
                 UserGitHubLink.slack_user_id,
                 UserGitHubLink.github_access_token,
@@ -148,8 +153,8 @@ async def _get_github_links_batch(
                 UserGitHubLink.slack_team_id == slack_team_id,
             )
         )
-        links = {}
-        for row in result.all():
+        links: dict[str, tuple[bool, str, bool]] = {}
+        for row in oauth_result.all():
             has_token = bool(row.github_access_token)
             has_login = bool(row.github_login)
             links[row.slack_user_id] = (
@@ -157,7 +162,26 @@ async def _get_github_links_batch(
                 row.github_login or "",
                 has_token,               # uses_own_token
             )
-    # Fill in missing users (no GitHub link at all)
+
+        # ── 2. Manually-set handles in TeamMember (for users not in OAuth table)
+        missing = [uid for uid in slack_user_ids if uid not in links]
+        if missing:
+            tm_result = await db.execute(
+                select(TeamMember.slack_user_id, TeamMember.github_login).where(
+                    TeamMember.slack_user_id.in_(missing),
+                    TeamMember.slack_team_id == slack_team_id,
+                    TeamMember.github_login.isnot(None),
+                    TeamMember.github_login != "",
+                )
+            )
+            for row in tm_result.all():
+                links[row.slack_user_id] = (
+                    True,               # can_sync (manager's token will be used)
+                    row.github_login,
+                    False,              # uses_own_token
+                )
+
+    # Fill in users with no GitHub info at all
     return {uid: links.get(uid, (False, "", False)) for uid in slack_user_ids}
 
 
