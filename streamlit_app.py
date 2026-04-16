@@ -16,7 +16,7 @@ from app.streamlit_env import load_streamlit_secrets_into_env
 # Inject Streamlit Cloud secrets if available; fall back to local `.env`.
 load_streamlit_secrets_into_env()
 
-from app.ui.session_cookie import restore_session_from_cookie, set_session_cookie
+from app.ui.session_cookie import restore_session_from_cookie, make_session_token, _URL_PARAM
 
 # Allow nested event loops — required for asyncio.run() inside Streamlit Cloud
 nest_asyncio.apply()
@@ -88,17 +88,18 @@ if "code" in params:
                 st.session_state["slack_user_id"] = token.slack_user_id
                 st.session_state["slack_team_id"] = token.slack_team_id
                 st.session_state["slack_display_name"] = token.slack_display_name
-                # Persist identity in a signed cookie so it survives OAuth
-                # redirects, page refreshes, and tab close/reopen.
-                set_session_cookie(
-                    token.slack_user_id,
-                    token.slack_team_id,
-                    token.slack_display_name or "",
-                )
                 st.success(
                     f"✅ Signed in as **{token.slack_display_name}** "
                     f"(team: {token.slack_team_name})"
                 )
+                # Embed a short-lived signed token in the redirect so Connect
+                # page can restore session_state after the navigation.
+                _sess_token = make_session_token(
+                    token.slack_user_id,
+                    token.slack_team_id,
+                    token.slack_display_name or "",
+                )
+                st.query_params[_URL_PARAM] = _sess_token
                 st.switch_page("pages/1_Connect.py")
 
             except Exception as e:
