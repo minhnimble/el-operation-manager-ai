@@ -15,6 +15,7 @@ class SlackMessage(Base):
     __table_args__ = (
         Index("ix_slack_messages_user_ts", "slack_user_id", "message_ts"),
         Index("ix_slack_messages_channel", "channel_id", "message_ts"),
+        Index("ix_slack_messages_channel_ts", "channel_id", "timestamp"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

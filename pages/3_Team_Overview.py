@@ -132,15 +132,20 @@ async def _get_workspace_users(slack_user_id: str, slack_team_id: str) -> list[d
     return users
 
 
-async def _get_oauth_github_login(slack_user_id: str) -> str | None:
-    """Return GitHub login from UserGitHubLink (OAuth-connected members)."""
+async def _get_oauth_github_logins(slack_user_ids: list[str]) -> dict[str, str | None]:
+    """Batch-fetch GitHub logins for multiple users in a single query."""
+    if not slack_user_ids:
+        return {}
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(UserGitHubLink.github_login).where(
-                UserGitHubLink.slack_user_id == slack_user_id
+            select(
+                UserGitHubLink.slack_user_id,
+                UserGitHubLink.github_login,
+            ).where(
+                UserGitHubLink.slack_user_id.in_(slack_user_ids)
             )
         )
-        return result.scalar_one_or_none()
+        return {row.slack_user_id: row.github_login for row in result.all()}
 
 
 def _effective_github_login(member: TeamMember, oauth_login: str | None) -> str | None:
@@ -168,15 +173,33 @@ if not slack_user_id:
 st.subheader("Your Team")
 st.caption(f"Managing as **{manager_name}**")
 
-team_members = run(_get_team_members(slack_user_id, slack_team_id))
+
+def _load_team_data(user_id: str, team_id: str):
+    """Load team members + GitHub logins. Cached in session state."""
+    cache = st.session_state.get("_team_cache")
+    if cache and cache["user_id"] == user_id and cache["team_id"] == team_id:
+        return cache["members"], cache["gh_logins"]
+    members = run(_get_team_members(user_id, team_id))
+    gh_logins = run(_get_oauth_github_logins(
+        [m.member_slack_user_id for m in members]
+    )) if members else {}
+    st.session_state["_team_cache"] = {
+        "user_id": user_id, "team_id": team_id,
+        "members": members, "gh_logins": gh_logins,
+    }
+    return members, gh_logins
+
+
+def _invalidate_team_cache():
+    st.session_state.pop("_team_cache", None)
+
+
+team_members, _cached_gh_logins = _load_team_data(slack_user_id, slack_team_id)
 
 if not team_members:
     st.info("No team members added yet. Use **Add Members** below to get started.")
 else:
-    github_logins = {
-        m.member_slack_user_id: run(_get_oauth_github_login(m.member_slack_user_id))
-        for m in team_members
-    }
+    github_logins = _cached_gh_logins
 
     c1, c2 = st.columns(2)
     c1.metric("Team size", len(team_members))
@@ -226,11 +249,13 @@ else:
                         member.member_slack_user_id,
                         new_gh.strip() or None,
                     ))
+                    _invalidate_team_cache()
                     st.success("GitHub handle updated.")
                     st.rerun()
 
         if cols[4].button("✕", key=f"remove_{member.member_slack_user_id}"):
             run(_remove_member(slack_user_id, slack_team_id, member.member_slack_user_id))
+            _invalidate_team_cache()
             st.success(f"Removed {member.display()}")
             st.rerun()
 
@@ -299,6 +324,7 @@ with st.expander("Browse workspace users", expanded=len(team_members) == 0):
                     else:
                         st.info("Those members were already in your team.")
                     st.session_state.pop("_ws_users", None)
+                    _invalidate_team_cache()
                     st.rerun()
 
     elif "_ws_users_error" in st.session_state:

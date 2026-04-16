@@ -513,6 +513,7 @@ class SlackIngester:
         oldest: datetime | None = None,
         latest: datetime | None = None,
         filter_user_id: str | None = None,
+        cancel_check: "callable | None" = None,
     ) -> tuple[int, list[str]]:
         """Backfill a channel into SlackMessage table.
 
@@ -552,7 +553,15 @@ class SlackIngester:
                 filter_user_id, channel_name, target_names,
             )
 
+        _cancelled = False
+
         async for msg in self.iter_channel_messages(channel_id, oldest=oldest_ts, latest=latest_ts):
+            # Check for cancellation every message
+            if cancel_check and cancel_check():
+                logger.info("Backfill of #%s cancelled by caller", channel_name)
+                _cancelled = True
+                break
+
             subtype = msg.get("subtype", "")
             ts = msg.get("ts", "")
 

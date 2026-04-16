@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import String, DateTime, Boolean, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -32,7 +32,10 @@ class UserGitHubLink(Base):
     """Maps a Slack user to their GitHub handle and stores their OAuth token."""
 
     __tablename__ = "user_github_links"
-    __table_args__ = (UniqueConstraint("slack_user_id", "slack_team_id"),)
+    __table_args__ = (
+        UniqueConstraint("slack_user_id", "slack_team_id"),
+        Index("ix_github_links_user_team", "slack_user_id", "slack_team_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     slack_user_id: Mapped[str] = mapped_column(

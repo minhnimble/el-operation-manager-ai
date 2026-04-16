@@ -144,12 +144,14 @@ async def _sync_slack_channel(
     oldest: datetime,
     latest: datetime | None = None,
     filter_user_id: str | None = None,
+    cancel_check: "callable | None" = None,
 ) -> tuple[int, str | None, list[str]]:
     """Sync one channel. Returns (messages_saved, error_or_None, unresolved_bot_names).
 
     oldest / latest   — time bounds; latest=None means up to the present.
     filter_user_id    — when set, only messages from or mentioning this user are saved.
     unresolved_bot_names — standup bot usernames that couldn't be matched to any user.
+    cancel_check      — callable returning True to abort mid-channel.
     """
     async with AsyncSessionLocal() as db:
         ingester = SlackIngester(user_token=access_token, team_id=team_id)
@@ -162,6 +164,7 @@ async def _sync_slack_channel(
                 oldest=oldest,
                 latest=latest,
                 filter_user_id=filter_user_id,
+                cancel_check=cancel_check,
             )
             # backfill_channel returns (count, unresolved_names); guard against
             # any cached old version that returned just int.
@@ -541,6 +544,7 @@ def _run_slack_sync_bg(
                         access_token, slack_team_id, slack_user_id,
                         ch_id, ch_name, oldest, latest=latest,
                         filter_user_id=mf,
+                        cancel_check=lambda: job.get("stop_requested", False),
                     ))
                     if err:
                         member_errors.append(f"#{ch_name}: {err}")
