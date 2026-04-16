@@ -25,6 +25,8 @@ from app.models.user import UserGitHubLink
 from app.slack.oauth import build_auth_url
 
 st.set_page_config(page_title="Connect Accounts", page_icon="🔗", layout="wide")
+from app.ui.page_utils import inject_page_load_bar
+inject_page_load_bar()
 settings = get_settings()
 
 
@@ -172,7 +174,9 @@ st.subheader("GitHub")
 if not slack_user_id:
     st.warning("Connect Slack first to enable GitHub linking.")
 else:
-    status = run(_get_connection_status(slack_user_id, slack_team_id))
+    from app.ui.page_utils import loading_section
+    with loading_section("Checking connection status…", n_skeleton_lines=2):
+        status = run(_get_connection_status(slack_user_id, slack_team_id))
 
     if status["github_connected"]:
         col1, col2 = st.columns([4, 1])

@@ -42,6 +42,8 @@ st.set_page_config(
     page_icon="⚙️",
     layout="wide",
 )
+from app.ui.page_utils import inject_page_load_bar
+inject_page_load_bar()
 
 
 def run_async(coro):

@@ -26,6 +26,8 @@ from app.ingestion.slack_ingester import get_slack_ingester
 from app.slack.users import list_workspace_users
 
 st.set_page_config(page_title="Team Overview", page_icon="👥", layout="wide")
+from app.ui.page_utils import inject_page_load_bar
+inject_page_load_bar()
 
 
 def run(coro):
@@ -194,7 +196,17 @@ def _invalidate_team_cache():
     st.session_state.pop("_team_cache", None)
 
 
-team_members, _cached_gh_logins = _load_team_data(slack_user_id, slack_team_id)
+from app.ui.page_utils import loading_section
+# Only show skeleton on first load (cache miss). Cache hits are instant.
+_cache_hit = bool(
+    st.session_state.get("_team_cache")
+    and st.session_state["_team_cache"].get("user_id") == slack_user_id
+)
+if _cache_hit:
+    team_members, _cached_gh_logins = _load_team_data(slack_user_id, slack_team_id)
+else:
+    with loading_section("Loading your team…", n_skeleton_lines=4):
+        team_members, _cached_gh_logins = _load_team_data(slack_user_id, slack_team_id)
 
 if not team_members:
     st.info("No team members added yet. Use **Add Members** below to get started.")

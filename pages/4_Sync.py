@@ -36,6 +36,8 @@ from app.ingestion.github_ingester import GitHubIngester
 from app.normalization.normalizer import normalize_slack_messages, normalize_github_activities
 
 st.set_page_config(page_title="Sync Data", page_icon="🔄", layout="wide")
+from app.ui.page_utils import inject_page_load_bar
+inject_page_load_bar()
 
 # ── Channel ignore list ────────────────────────────────────────────────────────
 
@@ -963,8 +965,19 @@ st.markdown("---")
 
 # ─── Team member selector ─────────────────────────────────────────────────────
 
+from app.ui.page_utils import loading_section
+
 self_name = st.session_state.get("slack_display_name", slack_user_id)
-team_options, _gh_links_by_name = _load_sync_page_data(slack_user_id, slack_team_id, self_name)
+# Only show loading skeleton on a cache miss (first visit or after refresh)
+_sync_cache_hit = bool(
+    st.session_state.get("_sync_page_cache")
+    and st.session_state["_sync_page_cache"].get("user_id") == slack_user_id
+)
+if _sync_cache_hit:
+    team_options, _gh_links_by_name = _load_sync_page_data(slack_user_id, slack_team_id, self_name)
+else:
+    with loading_section("Loading team and GitHub links…", n_skeleton_lines=4):
+        team_options, _gh_links_by_name = _load_sync_page_data(slack_user_id, slack_team_id, self_name)
 all_member_names = list(team_options.keys())
 
 # Initialise to just "myself" on first load

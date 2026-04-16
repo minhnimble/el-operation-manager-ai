@@ -23,6 +23,8 @@ from app.analytics.report_builder import build_work_report, format_report_for_sl
 from app.ai.schemas import WorkReport
 
 st.set_page_config(page_title="Work Report", page_icon="📊", layout="wide")
+from app.ui.page_utils import inject_page_load_bar
+inject_page_load_bar()
 
 
 def run(coro):
@@ -359,11 +361,14 @@ if not slack_user_id:
 
 # ─── Controls ─────────────────────────────────────────────────────────────────
 
+from app.ui.page_utils import loading_section
+
 col1, col2, col3 = st.columns([2, 2, 1])
 
 with col1:
     self_name = st.session_state.get("slack_display_name", slack_user_id)
-    user_options = run(_get_team_options(slack_user_id, slack_team_id, self_name))
+    with loading_section("Loading team members…", n_skeleton_lines=1):
+        user_options = run(_get_team_options(slack_user_id, slack_team_id, self_name))
 
     selected_name = st.selectbox(
         "Team member",
@@ -415,51 +420,53 @@ if not report:
 
 # ─── Display ──────────────────────────────────────────────────────────────────
 
-# Load user map: start from DB, then enrich unknown IDs via Slack API
-_user_map: dict[str, str] = run(_load_user_map(slack_team_id))
+# Load user map + token in one loading section — these run every time a
+# report is displayed (not cached, since team membership changes often).
+with loading_section("Preparing report display…", n_skeleton_lines=3):
+    _user_map: dict[str, str] = run(_load_user_map(slack_team_id))
 
-_all_slack_msgs = [a for a in report.recent_activity if a.get("source") == "slack"]
+    _all_slack_msgs = [a for a in report.recent_activity if a.get("source") == "slack"]
 
-# Build initial channel map from what the DB already returned
-_channel_map: dict[str, str] = {
-    a["slack_channel_id"]: a["channel_name"]
-    for a in _all_slack_msgs
-    if a.get("slack_channel_id") and a.get("channel_name") and a["channel_name"] != a["slack_channel_id"]
-}
+    # Build initial channel map from what the DB already returned
+    _channel_map: dict[str, str] = {
+        a["slack_channel_id"]: a["channel_name"]
+        for a in _all_slack_msgs
+        if a.get("slack_channel_id") and a.get("channel_name") and a["channel_name"] != a["slack_channel_id"]
+    }
 
-_unknown_user_ids = _collect_unknown_user_ids(_all_slack_msgs, _user_map)
-_unknown_channel_ids = {
-    a["slack_channel_id"]
-    for a in _all_slack_msgs
-    if a.get("slack_channel_id") and a["slack_channel_id"] not in _channel_map
-}
+    _unknown_user_ids = _collect_unknown_user_ids(_all_slack_msgs, _user_map)
+    _unknown_channel_ids = {
+        a["slack_channel_id"]
+        for a in _all_slack_msgs
+        if a.get("slack_channel_id") and a["slack_channel_id"] not in _channel_map
+    }
 
-# Always fetch the Slack token — needed for image attachment fetching
-# (Slack file URLs are bearer-auth gated). Enrichment of unknown users /
-# channels still piggybacks on the same token when present.
-_slack_token: str | None = None
-try:
-    from app.models.slack_token import SlackUserToken
+    # Always fetch the Slack token — needed for image attachment fetching
+    # (Slack file URLs are bearer-auth gated). Enrichment of unknown users /
+    # channels still piggybacks on the same token when present.
+    _slack_token: str | None = None
+    try:
+        from app.models.slack_token import SlackUserToken
 
-    async def _get_slack_token_for_report() -> str | None:
-        async with AsyncSessionLocal() as _db:
-            _r = await _db.execute(
-                select(SlackUserToken).where(
-                    SlackUserToken.slack_user_id == slack_user_id,
-                    SlackUserToken.slack_team_id == slack_team_id,
+        async def _get_slack_token_for_report() -> str | None:
+            async with AsyncSessionLocal() as _db:
+                _r = await _db.execute(
+                    select(SlackUserToken).where(
+                        SlackUserToken.slack_user_id == slack_user_id,
+                        SlackUserToken.slack_team_id == slack_team_id,
+                    )
                 )
-            )
-            _rec = _r.scalar_one_or_none()
-            return _rec.access_token if _rec else None
+                _rec = _r.scalar_one_or_none()
+                return _rec.access_token if _rec else None
 
-    _slack_token = run(_get_slack_token_for_report())
-    if _slack_token:
-        if _unknown_user_ids:
-            _user_map = _enrich_user_map(_user_map, _unknown_user_ids, _slack_token)
-        if _unknown_channel_ids:
-            _channel_map = _enrich_channel_map(_channel_map, _unknown_channel_ids, _slack_token)
-except Exception:
-    pass  # enrichment is best-effort; falls back to raw ID on any error
+        _slack_token = run(_get_slack_token_for_report())
+        if _slack_token:
+            if _unknown_user_ids:
+                _user_map = _enrich_user_map(_user_map, _unknown_user_ids, _slack_token)
+            if _unknown_channel_ids:
+                _channel_map = _enrich_channel_map(_channel_map, _unknown_channel_ids, _slack_token)
+    except Exception:
+        pass  # enrichment is best-effort; falls back to raw ID on any error
 
 # Patch channel_name in activity items using the enriched channel map
 for _a in report.recent_activity:
