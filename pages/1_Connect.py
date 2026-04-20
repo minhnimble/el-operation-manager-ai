@@ -127,16 +127,10 @@ async def _disconnect_github(slack_user_id: str, slack_team_id: str) -> None:
         await db.commit()
 
 
-async def _get_connection_status(slack_user_id: str, slack_team_id: str) -> dict:
+async def _get_github_status(slack_user_id: str, slack_team_id: str) -> dict:
+    """Fetch just the GitHub link. The Slack half of the old combined
+    helper was dead weight on this page — Slack state comes from session_state."""
     async with AsyncSessionLocal() as db:
-        slack_result = await db.execute(
-            select(SlackUserToken).where(
-                SlackUserToken.slack_user_id == slack_user_id,
-                SlackUserToken.slack_team_id == slack_team_id,
-            )
-        )
-        slack_token = slack_result.scalar_one_or_none()
-
         github_result = await db.execute(
             select(UserGitHubLink).where(
                 UserGitHubLink.slack_user_id == slack_user_id,
@@ -146,8 +140,6 @@ async def _get_connection_status(slack_user_id: str, slack_team_id: str) -> dict
         github_link = github_result.scalar_one_or_none()
 
     return {
-        "slack_connected": slack_token is not None,
-        "slack_name": slack_token.slack_display_name if slack_token else None,
         "github_connected": github_link is not None and github_link.github_login is not None,
         "github_login": github_link.github_login if github_link else None,
     }
@@ -217,15 +209,25 @@ if not slack_user_id:
 else:
     from app.ui.page_utils import loading_section
 
-    # Skip the "Checking connection status…" skeleton on the rerun that follows
-    # a disconnect — we already know the new state. Keeps the transition to a
-    # single visible loading phase (spinner during the delete) instead of
-    # flashing the stale "Connected" state twice.
-    if st.session_state.pop("_gh_just_disconnected", False):
-        status = run(_get_connection_status(slack_user_id, slack_team_id))
+    # Cache the GitHub link status in session_state so navigating away and
+    # back to this page doesn't re-hit the DB (and doesn't flash the
+    # "Checking connection status…" skeleton every time). Cache is keyed
+    # by (slack_user_id, slack_team_id) and invalidated on disconnect.
+    _cache_key = (slack_user_id, slack_team_id)
+    _cached = st.session_state.get("_gh_status_cache")
+    _force_refresh = st.session_state.pop("_gh_just_disconnected", False)
+
+    if _cached and _cached["key"] == _cache_key and not _force_refresh:
+        status = _cached["status"]
+    elif _force_refresh:
+        # Post-disconnect: fetch fresh without a skeleton; the disconnect
+        # spinner already conveyed that work was happening.
+        status = run(_get_github_status(slack_user_id, slack_team_id))
+        st.session_state["_gh_status_cache"] = {"key": _cache_key, "status": status}
     else:
         with loading_section("Checking connection status…", n_skeleton_lines=2):
-            status = run(_get_connection_status(slack_user_id, slack_team_id))
+            status = run(_get_github_status(slack_user_id, slack_team_id))
+        st.session_state["_gh_status_cache"] = {"key": _cache_key, "status": status}
 
     if status["github_connected"]:
         col1, col2 = st.columns([4, 1])
@@ -236,6 +238,7 @@ else:
             with col1:
                 with st.spinner("Disconnecting GitHub…"):
                     run(_disconnect_github(slack_user_id, slack_team_id))
+            st.session_state.pop("_gh_status_cache", None)
             st.session_state["_gh_just_disconnected"] = True
             st.rerun()
         col1.success(f"✅ Connected as **@{status['github_login']}**")
