@@ -685,12 +685,16 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
             if _curr is not None:
                 _hdr_cols[1].metric("Current level", _curr)
 
-            for _lv in _dt_track.levels:
+            # Render levels high → low, and hide fully-vetted levels so the
+            # report focuses on what's still in progress or ahead.
+            for _lv in sorted(_dt_track.levels, key=lambda l: l.level, reverse=True):
                 if not _lv.skills:
                     continue
                 _counts = _lv.counts
                 _done = _counts["completed"]
                 _total = len(_lv.skills)
+                if _done == _total:
+                    continue
                 _is_current = (_curr == _lv.level)
                 _prefix = "⭐ " if _is_current else ""
                 st.markdown(
