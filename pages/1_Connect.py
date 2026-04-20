@@ -230,18 +230,17 @@ else:
         st.session_state["_gh_status_cache"] = {"key": _cache_key, "status": status}
 
     if status["github_connected"]:
-        col1, col2 = st.columns([4, 1])
-        # Render the button *before* the success line so we can detect the
-        # click and suppress the stale "✅ Connected" render in the same rerun.
-        disconnect_clicked = col2.button("Disconnect", key="disconnect_github")
-        if disconnect_clicked:
-            with col1:
-                with st.spinner("Disconnecting GitHub…"):
-                    run(_disconnect_github(slack_user_id, slack_team_id))
-            st.session_state.pop("_gh_status_cache", None)
-            st.session_state["_gh_just_disconnected"] = True
-            st.rerun()
-        col1.success(f"✅ Connected as **@{status['github_login']}**")
+        # Single-slot rendering: the whole connected-state UI lives inside
+        # `gh_slot`. On disconnect we `.empty()` the slot and re-fill it with
+        # the spinner, so the browser never sees the Disconnect button sitting
+        # next to the spinner (the cause of the "two disconnect buttons" flash).
+        gh_slot = st.empty()
+        reconnect_slot = st.empty()
+
+        with gh_slot.container():
+            col1, col2 = st.columns([4, 1])
+            col1.success(f"✅ Connected as **@{status['github_login']}**")
+            disconnect_clicked = col2.button("Disconnect", key="disconnect_github")
 
         github_state = f"github:{slack_team_id}:{slack_user_id}"
         github_url = (
@@ -251,7 +250,20 @@ else:
             f"&state={github_state}"
             f"&redirect_uri={quote(settings.app_base_url, safe='')}"
         )
-        _oauth_button("Reconnect GitHub (refresh token / scopes)", github_url, primary=False)
+        with reconnect_slot.container():
+            _oauth_button("Reconnect GitHub (refresh token / scopes)", github_url, primary=False)
+
+        if disconnect_clicked:
+            # Clear the connected UI first so only the spinner is visible
+            # while the delete runs.
+            gh_slot.empty()
+            reconnect_slot.empty()
+            with gh_slot.container():
+                with st.spinner("Disconnecting GitHub…"):
+                    run(_disconnect_github(slack_user_id, slack_team_id))
+            st.session_state.pop("_gh_status_cache", None)
+            st.session_state["_gh_just_disconnected"] = True
+            st.rerun()
     else:
         st.info("Link your GitHub account to enable commit and PR tracking.")
         github_state = f"github:{slack_team_id}:{slack_user_id}"
