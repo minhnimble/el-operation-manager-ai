@@ -50,13 +50,16 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
     safe_href = _html.escape(url, quote=True)
     safe_label = _html.escape(label)
 
-    # Primary = filled red (matches Streamlit's default primary). Non-primary
-    # is filled dark-grey so "Reconnect" is clearly a clickable button rather
-    # than fading into the background.
-    bg     = "#ff4b4b" if primary else "#31333f"
-    fg     = "#ffffff"
-    border = "#ff4b4b" if primary else "#31333f"
-    hover_bg     = "#e03e3e" if primary else "#1f2029"
+    # Match the rest of the app's button system (see .streamlit/config.toml):
+    #   Primary  → filled blue (theme primaryColor #4C9BE8), white text.
+    #   Secondary → transparent bg, white text, white border — visible on the
+    #               dark theme without competing with the primary CTA.
+    if primary:
+        bg, fg, border = "#4C9BE8", "#ffffff", "#4C9BE8"
+        hover_bg, hover_border = "#3b8ad6", "#3b8ad6"
+    else:
+        bg, fg, border = "transparent", "#ffffff", "#ffffff"
+        hover_bg, hover_border = "rgba(255,255,255,0.08)", "#ffffff"
 
     components.html(
         f"""
@@ -78,7 +81,7 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
           }}
           .el-oauth-btn:hover {{
             background:{hover_bg};
-            border-color:{hover_bg};
+            border-color:{hover_border};
           }}
         </style>
         <a href="#" class="el-oauth-btn"
