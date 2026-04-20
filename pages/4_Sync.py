@@ -855,6 +855,44 @@ def _run_slack_sync_bg(
         job["running"] = False
 
 
+def _run_slack_sync_both_bg(
+    job: dict,
+    access_token: str,
+    slack_user_id: str,
+    slack_team_id: str,
+    target_users: list,
+    oldest: "datetime",
+    latest: "datetime | None",
+    my_gen: int,
+) -> None:
+    """Run normal + standup Slack sync back-to-back under a single job."""
+    phase_summaries: list[str] = []
+    for phase_idx, mode in enumerate(("normal", "standup"), start=1):
+        # Reset per-phase state while preserving cumulative log.
+        job["running"] = True
+        job["progress"] = 0
+        job["progress_text"] = f"Phase {phase_idx}/2 · {mode}…"
+        job["member_statuses"] = []
+        job["summary"] = ""
+        job["_mode"] = mode
+        _jlog(job, f"\n━━━ Phase {phase_idx}/2 · {mode} ━━━", "info")
+
+        _run_slack_sync_bg(
+            job, access_token, slack_user_id, slack_team_id,
+            target_users, oldest, latest, mode, my_gen,
+        )
+        phase_summaries.append(job.get("summary", ""))
+
+        # Bail out early if the user stopped or a newer sync superseded us.
+        if job.get("stop_requested") or not _slack_gen_alive(my_gen):
+            break
+
+    job["progress"] = 100
+    job["progress_text"] = "Done ✓"
+    job["summary"] = "  \n".join(s for s in phase_summaries if s)
+    job["running"] = False
+
+
 def _run_github_sync_bg(
     job: dict,
     slack_team_id: str,
@@ -1190,7 +1228,7 @@ else:
         f"**{selected_names[0]}**. No separate token needed."
     )
 
-_slack_btn_col1, _slack_btn_col2 = st.columns(2)
+_slack_btn_col1, _slack_btn_col2, _slack_btn_col3 = st.columns(3)
 with _slack_btn_col1:
     sync_normal_clicked = st.button(
         "Sync Slack Messages", type="primary", key="sync_slack_normal",
@@ -1201,9 +1239,17 @@ with _slack_btn_col2:
         "Sync Daily Standup", type="secondary", key="sync_slack_standup",
         help="Sync only the daily-standup channel.",
     )
+with _slack_btn_col3:
+    sync_both_clicked = st.button(
+        "Sync Both", type="secondary", key="sync_slack_both",
+        help="Run Sync Slack Messages and Sync Daily Standup back-to-back.",
+    )
 
-if sync_normal_clicked or sync_standup_clicked:
-    slack_sync_mode = "normal" if sync_normal_clicked else "standup"
+if sync_normal_clicked or sync_standup_clicked or sync_both_clicked:
+    if sync_both_clicked:
+        slack_sync_mode = "both"
+    else:
+        slack_sync_mode = "normal" if sync_normal_clicked else "standup"
     # Fetch token in main thread (fast DB lookup — needed before thread starts)
     try:
         access_token = run(_get_slack_token(slack_user_id, slack_team_id))
@@ -1218,12 +1264,20 @@ if sync_normal_clicked or sync_standup_clicked:
     job["_gen"] = my_gen
     job["_mode"] = slack_sync_mode
     st.session_state["_slack_sync_job"] = job
-    threading.Thread(
-        target=_run_slack_sync_bg,
-        args=(job, access_token, slack_user_id, slack_team_id,
-              target_users, sync_start, sync_end, slack_sync_mode, my_gen),
-        daemon=True,
-    ).start()
+    if slack_sync_mode == "both":
+        threading.Thread(
+            target=_run_slack_sync_both_bg,
+            args=(job, access_token, slack_user_id, slack_team_id,
+                  target_users, sync_start, sync_end, my_gen),
+            daemon=True,
+        ).start()
+    else:
+        threading.Thread(
+            target=_run_slack_sync_bg,
+            args=(job, access_token, slack_user_id, slack_team_id,
+                  target_users, sync_start, sync_end, slack_sync_mode, my_gen),
+            daemon=True,
+        ).start()
     st.rerun()
 
 # Show live / last-run progress for Slack (persists across page navigations).
