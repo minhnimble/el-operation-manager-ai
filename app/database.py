@@ -1,5 +1,4 @@
-import uuid
-
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
@@ -38,23 +37,23 @@ settings = get_settings()
 # cached handle that no longer exists on the server.
 # Under Supabase's Transaction Pooler (PgBouncer, pool_mode=transaction), the
 # pooler reuses backend connections across clients, so server-side prepared
-# statement names like "asyncpg_stmt_4" can collide across clients and raise
-# DuplicatePreparedStatementError. Three knobs together make this safe:
+# statement names like "asyncpg_stmt_4" can collide and raise
+# DuplicatePreparedStatementError.
 #
 #   • statement_cache_size=0 (asyncpg connect_arg) — disables asyncpg's own
 #     client-side prepared-statement LRU cache.
-#   • prepared_statement_cache_size=0 (dialect kwarg) — disables SQLAlchemy's
-#     asyncpg-dialect prepared-statement cache.
-#   • prepared_statement_name_func (dialect kwarg) — gives every prepared
-#     statement a UUID-suffixed name so two clients sharing a pooled backend
-#     can never collide.
+#   • prepared_statement_cache_size=0 (URL query param on the asyncpg dialect)
+#     — disables SQLAlchemy's asyncpg-dialect prepared-statement cache. It
+#     must be on the URL; passing it as an engine kwarg raises TypeError.
+_db_url = make_url(settings.database_url).update_query_dict(
+    {"prepared_statement_cache_size": "0"}, append=True
+)
+
 engine = create_async_engine(
-    settings.database_url,
+    _db_url,
     poolclass=NullPool,
     echo=not settings.is_production,
     connect_args={"statement_cache_size": 0},
-    prepared_statement_cache_size=0,
-    prepared_statement_name_func=lambda: f"__asyncpg_{uuid.uuid4()}__",
 )
 
 AsyncSessionLocal = async_sessionmaker(
