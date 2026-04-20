@@ -658,72 +658,71 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
         except Exception as e:
             _dt_load_error = str(e)
 
-    with st.expander("📈 Developer Track", expanded=True):
-        if _dt_load_error:
-            st.warning(
-                f"Could not load the developer-track sheet: {_dt_load_error}"
+    st.markdown("## 📈 Developer Track")
+    if _dt_load_error:
+        st.warning(
+            f"Could not load the developer-track sheet: {_dt_load_error}"
+        )
+    else:
+        _dt_track = _dt_find_member_track(
+            _dt_tabs,
+            report.user_display_name,
+            report.user_real_name,
+            report.user_email,
+        )
+        if _dt_track is None:
+            st.info(
+                f"No developer-track tab found for **{report.user_display_name}**. "
+                "Make sure the sheet has a tab whose title contains the "
+                "person's Slack display name."
             )
         else:
-            _dt_track = _dt_find_member_track(
-                _dt_tabs,
-                report.user_display_name,
-                report.user_real_name,
-                report.user_email,
+            _curr = _dt_track.current_level
+            _hdr_cols = st.columns([2, 1])
+            _hdr_cols[0].markdown(
+                f"**Tab:** `{_dt_track.tab_title}`"
             )
-            if _dt_track is None:
-                st.info(
-                    f"No developer-track tab found for **{report.user_display_name}**. "
-                    "Make sure the sheet has a tab whose title contains the "
-                    "person's Slack display name."
-                )
-            else:
-                _curr = _dt_track.current_level
-                _hdr_cols = st.columns([2, 1])
-                _hdr_cols[0].markdown(
-                    f"**Tab:** `{_dt_track.tab_title}`"
-                )
-                if _curr is not None:
-                    _hdr_cols[1].metric("Current level", _curr)
+            if _curr is not None:
+                _hdr_cols[1].metric("Current level", _curr)
 
-                for _lv in _dt_track.levels:
-                    if not _lv.skills:
+            for _lv in _dt_track.levels:
+                if not _lv.skills:
+                    continue
+                _counts = _lv.counts
+                _done = _counts["completed"]
+                _total = len(_lv.skills)
+                _is_current = (_curr == _lv.level)
+                _prefix = "⭐ " if _is_current else ""
+                st.markdown(
+                    f"### {_prefix}Level {_lv.level} — {_lv.title or '(untitled)'}"
+                )
+                st.progress(
+                    _done / _total if _total else 0.0,
+                    text=f"{_done}/{_total} vetted",
+                )
+                # Status breakdown pills
+                _summary_parts = [
+                    f"{_DT_STATUS_LABELS[s]}: **{_counts[s]}**"
+                    for s in _DT_STATUS_ORDER if _counts[s]
+                ]
+                if _summary_parts:
+                    st.caption(" · ".join(_summary_parts))
+
+                # Skills grouped by status — progress-first ordering.
+                for _status in _DT_STATUS_ORDER:
+                    _skills_here = [s for s in _lv.skills if s.status == _status]
+                    if not _skills_here:
                         continue
-                    _counts = _lv.counts
-                    _done = _counts["completed"]
-                    _total = len(_lv.skills)
-                    _is_current = (_curr == _lv.level)
-                    _prefix = "⭐ " if _is_current else ""
-                    st.markdown(
-                        f"### {_prefix}Level {_lv.level} — {_lv.title or '(untitled)'}"
-                    )
-                    st.progress(
-                        _done / _total if _total else 0.0,
-                        text=f"{_done}/{_total} vetted",
-                    )
-                    # Status breakdown pills
-                    _summary_parts = [
-                        f"{_DT_STATUS_LABELS[s]}: **{_counts[s]}**"
-                        for s in _DT_STATUS_ORDER if _counts[s]
-                    ]
-                    if _summary_parts:
-                        st.caption(" · ".join(_summary_parts))
-
-                    # Skills grouped by status — progress-first ordering.
-                    for _status in _DT_STATUS_ORDER:
-                        _skills_here = [s for s in _lv.skills if s.status == _status]
-                        if not _skills_here:
-                            continue
-                        st.markdown(f"**{_DT_STATUS_LABELS[_status]}**")
-                        for _sk in _skills_here:
-                            if _sk.note:
-                                # Collapsible per-skill note — avoids flooding
-                                # the page with every manager comment but still
-                                # makes them one click away.
-                                with st.expander(f"• {_sk.text}", expanded=False):
-                                    st.markdown(_sk.note)
-                            else:
-                                st.markdown(f"- {_sk.text}")
-                    st.markdown("")  # spacer between levels
+                    st.markdown(f"**{_DT_STATUS_LABELS[_status]}**")
+                    for _sk in _skills_here:
+                        if _sk.note:
+                            # Inline italic note — expanders can't nest inside
+                            # the Activity Feed's parent expander elsewhere on
+                            # the page, so render notes as blockquoted text.
+                            st.markdown(f"- {_sk.text}  \n  > _{_sk.note}_")
+                        else:
+                            st.markdown(f"- {_sk.text}")
+                st.markdown("")  # spacer between levels
 
 st.markdown("---")
 
