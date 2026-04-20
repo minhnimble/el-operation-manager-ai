@@ -1243,10 +1243,11 @@ gh_info: dict[str, tuple[bool, str, bool]] = {
     name: _gh_links_by_name.get(name, (False, "", False)) for name, _uid in target_users
 }
 
-# Check if the manager (logged-in user) has a GitHub token for proxy use
-_manager_has_gh_token = gh_info.get(
-    next((n for n, u in target_users if u == slack_user_id), ""),
-    (False, "", False)
+# Check if the manager (logged-in user) has a GitHub token for proxy use.
+# Look up by display name in the full team map — not via target_users, since
+# the manager may not be in the selected sync set.
+_manager_has_gh_token = _gh_links_by_name.get(
+    f"{self_name} (me)", (False, "", False)
 )[2]
 
 members_with_gh = [(n, u) for n, u in target_users if gh_info[n][0]]
@@ -1274,10 +1275,15 @@ if members_with_gh:
     st.caption("Will sync: " + ", ".join(_sync_labels))
 
     if not _manager_has_gh_token and any(not gh_info[n][2] for n, _ in members_with_gh):
+        _proxy_members = ", ".join(
+            f"**{n}**" for n, _ in members_with_gh if not gh_info[n][2]
+        )
         st.warning(
-            "⚠️ Some members will use your GitHub token as a proxy, "
-            "but you haven't connected your GitHub account yet. "
-            "Go to **Connect Accounts** to link your GitHub."
+            f"⚠️ {_proxy_members} haven't connected their own GitHub account, "
+            "so syncing their data requires falling back to your GitHub token — "
+            "but you haven't connected yours either. "
+            "Either ask them to connect their GitHub, or go to **Connect Accounts** "
+            "to link a GitHub account with access to their activity."
         )
 
     if st.button("Sync GitHub", type="primary"):
