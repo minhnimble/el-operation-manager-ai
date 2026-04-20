@@ -127,6 +127,10 @@ APP_BASE_URL    = "https://yourapp.streamlit.app"
 APP_SECRET_KEY  = "..."   # see note below
 
 ENABLE_AI_EXTRACTION = "true"
+
+# Optional — see "Developer Track (Google Sheets)" under Usage
+GOOGLE_SHEETS_CREDENTIALS_JSON = ""
+DEV_TRACK_SHEET_ID             = ""
 ```
 
 > **`APP_SECRET_KEY`** signs the session cookie that keeps you logged in across page navigations and OAuth redirects. Generate one with:
@@ -179,7 +183,29 @@ Go to **📊 Work Report**, select a member, choose a date range, and click **Ge
 
 - **Activity Feed** — commits, PRs, reviews, standups, all browsable
 - **AI Insights** — Claude-powered work classification and leadership summary
+- **Developer Track** — optional level + skill progress from a Google Sheet (see below)
 - **Share Summary** — one-click copy for Slack, email, or docs
+
+### Optional: Developer Track (Google Sheets)
+
+Shows each member's skill-vetting progress in the Work Report. Cell background colors drive status (green = vetted, blue = in progress, purple = proposed, yellow = focus, white = not started); cell notes render inline.
+
+**Sheet format** — one tab per person. The tab name must share a token (≥3 chars) with the member's Slack **display name**, **real name**, or **email local-part** (e.g. `don.vo@…` → `Don Vo`), so first name, last name, or full name all work. Column A = integer level, column B = level title, columns C+ = skills.
+
+| Col A | Col B                         | Col C — skills | Col D — skills |
+|-------|-------------------------------|----------------|----------------|
+| `3`   | Junior Software Developer     | *skill text*   | *skill text*   |
+| `4`   | Mid-senior Software Developer | *skill text*   | *skill text*   |
+
+**Setup:**
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), enable the **Google Sheets API** and create a **Service Account** (no roles needed). Add a **JSON key** — a file downloads.
+2. In the sheet, click **Share** and grant **Viewer** to the key's `client_email`.
+3. Set `GOOGLE_SHEETS_CREDENTIALS_JSON` (full JSON as a single-line string) and `DEV_TRACK_SHEET_ID` (URL segment between `/d/` and `/edit`) in secrets / `.env`. Reboot.
+
+> **TOML tip:** wrap the JSON in single quotes so its double quotes parse; leave `\n` in `private_key` as-is.
+
+Troubleshooting: *"No developer-track tab found"* → rename the tab to include the member's first name, last name, or full name as it appears in Slack. *"Caller does not have permission"* → share the sheet with `client_email`. *"not valid JSON"* → re-copy the full file, single-quote-wrapped.
 
 ---
 

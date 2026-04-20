@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
 
+    # Google Sheets — Developer Track integration
+    # google_sheets_credentials_json: full JSON key for a service account with
+    # read access to the sheet. Paste as a single-line JSON string.
+    # dev_track_sheet_id: the Google Sheet ID (the part between /d/ and /edit
+    # in the sheet URL).
+    google_sheets_credentials_json: str = ""
+    dev_track_sheet_id: str = ""
+
     # Feature flags
     enable_ai_extraction: bool = True
     enable_burnout_detection: bool = False

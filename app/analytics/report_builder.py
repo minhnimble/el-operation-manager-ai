@@ -52,10 +52,16 @@ async def build_work_report(
 
     if user:
         display_name = user.slack_display_name or user.slack_real_name or slack_user_id
+        real_name = user.slack_real_name or ""
+        email = getattr(user, "slack_email", "") or ""
     elif team_member:
         display_name = team_member.display()
+        real_name = team_member.member_real_name or ""
+        email = team_member.member_email or ""
     else:
         display_name = slack_user_id
+        real_name = ""
+        email = ""
 
     date_range = f"{start_date.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}"
 
@@ -225,6 +231,8 @@ async def build_work_report(
 
     report = WorkReport(
         user_display_name=display_name,
+        user_real_name=real_name,
+        user_email=email,
         date_range=date_range,
         commits=commits,
         prs_opened=prs_opened,

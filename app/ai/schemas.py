@@ -23,6 +23,10 @@ class StandupExtraction(BaseModel):
 
 class WorkReport(BaseModel):
     user_display_name: str
+    # Extra name candidates used for fuzzy matching to external systems
+    # (e.g. Google Sheets developer-track tab names). Not shown in the UI.
+    user_real_name: str = ""
+    user_email: str = ""
     date_range: str
     # GitHub metrics
     commits: int = 0

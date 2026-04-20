@@ -631,6 +631,102 @@ m6.metric("Discussions",   report.discussion_messages)
 
 st.markdown("---")
 
+# ─── Developer Track ──────────────────────────────────────────────────────────
+# Pulls the member's tab from the configured Google Sheet and renders each
+# level with its skill statuses (color-coded) and manager notes. The section
+# silently hides itself when the Sheets integration isn't configured.
+
+from app.config import get_settings as _get_settings
+from app.analytics.dev_track import (
+    STATUS_LABELS as _DT_STATUS_LABELS,
+    STATUS_ORDER as _DT_STATUS_ORDER,
+    find_member_track as _dt_find_member_track,
+)
+
+_dt_settings = _get_settings()
+if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_id:
+    # Fetch + cache the whole sheet once per session (one API call).
+    _dt_cache_key = ("dev_track_tabs", _dt_settings.dev_track_sheet_id)
+    _dt_tabs = st.session_state.get(_dt_cache_key)
+    _dt_load_error: str | None = None
+    if _dt_tabs is None:
+        try:
+            from app.integrations.google_sheets import fetch_all_tabs as _dt_fetch
+            with loading_section("Loading developer track sheet…", n_skeleton_lines=2):
+                _dt_tabs = _dt_fetch(_dt_settings.dev_track_sheet_id)
+            st.session_state[_dt_cache_key] = _dt_tabs
+        except Exception as e:
+            _dt_load_error = str(e)
+
+    with st.expander("📈 Developer Track", expanded=True):
+        if _dt_load_error:
+            st.warning(
+                f"Could not load the developer-track sheet: {_dt_load_error}"
+            )
+        else:
+            _dt_track = _dt_find_member_track(
+                _dt_tabs,
+                report.user_display_name,
+                report.user_real_name,
+                report.user_email,
+            )
+            if _dt_track is None:
+                st.info(
+                    f"No developer-track tab found for **{report.user_display_name}**. "
+                    "Make sure the sheet has a tab whose title contains the "
+                    "person's Slack display name."
+                )
+            else:
+                _curr = _dt_track.current_level
+                _hdr_cols = st.columns([2, 1])
+                _hdr_cols[0].markdown(
+                    f"**Tab:** `{_dt_track.tab_title}`"
+                )
+                if _curr is not None:
+                    _hdr_cols[1].metric("Current level", _curr)
+
+                for _lv in _dt_track.levels:
+                    if not _lv.skills:
+                        continue
+                    _counts = _lv.counts
+                    _done = _counts["completed"]
+                    _total = len(_lv.skills)
+                    _is_current = (_curr == _lv.level)
+                    _prefix = "⭐ " if _is_current else ""
+                    st.markdown(
+                        f"### {_prefix}Level {_lv.level} — {_lv.title or '(untitled)'}"
+                    )
+                    st.progress(
+                        _done / _total if _total else 0.0,
+                        text=f"{_done}/{_total} vetted",
+                    )
+                    # Status breakdown pills
+                    _summary_parts = [
+                        f"{_DT_STATUS_LABELS[s]}: **{_counts[s]}**"
+                        for s in _DT_STATUS_ORDER if _counts[s]
+                    ]
+                    if _summary_parts:
+                        st.caption(" · ".join(_summary_parts))
+
+                    # Skills grouped by status — progress-first ordering.
+                    for _status in _DT_STATUS_ORDER:
+                        _skills_here = [s for s in _lv.skills if s.status == _status]
+                        if not _skills_here:
+                            continue
+                        st.markdown(f"**{_DT_STATUS_LABELS[_status]}**")
+                        for _sk in _skills_here:
+                            if _sk.note:
+                                # Collapsible per-skill note — avoids flooding
+                                # the page with every manager comment but still
+                                # makes them one click away.
+                                with st.expander(f"• {_sk.text}", expanded=False):
+                                    st.markdown(_sk.note)
+                            else:
+                                st.markdown(f"- {_sk.text}")
+                    st.markdown("")  # spacer between levels
+
+st.markdown("---")
+
 col_left, col_right = st.columns(2)
 
 # GitHub activity bar chart
