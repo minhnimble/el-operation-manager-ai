@@ -50,13 +50,38 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
     safe_href = _html.escape(url, quote=True)
     safe_label = _html.escape(label)
 
-    bg     = "#ff4b4b" if primary else "transparent"
-    fg     = "#ffffff" if primary else "#31333f"
-    border = "#ff4b4b" if primary else "#d0d0d0"
+    # Primary = filled red (matches Streamlit's default primary). Non-primary
+    # is filled dark-grey so "Reconnect" is clearly a clickable button rather
+    # than fading into the background.
+    bg     = "#ff4b4b" if primary else "#31333f"
+    fg     = "#ffffff"
+    border = "#ff4b4b" if primary else "#31333f"
+    hover_bg     = "#e03e3e" if primary else "#1f2029"
 
     components.html(
         f"""
-        <a href="#"
+        <style>
+          .el-oauth-btn {{
+            display:inline-block;
+            background:{bg};
+            color:{fg};
+            border:1px solid {border};
+            border-radius:6px;
+            padding:8px 20px;
+            font-size:14px;
+            font-weight:500;
+            font-family:sans-serif;
+            line-height:1.5;
+            text-decoration:none;
+            cursor:pointer;
+            transition: background 120ms ease, border-color 120ms ease;
+          }}
+          .el-oauth-btn:hover {{
+            background:{hover_bg};
+            border-color:{hover_bg};
+          }}
+        </style>
+        <a href="#" class="el-oauth-btn"
            onclick="
              window.open('{safe_href}', '_blank');
              try {{
@@ -69,20 +94,7 @@ def _oauth_button(label: str, url: str, primary: bool = True) -> None:
                  + '<p>Please complete sign-in there. You can close this tab.</p>'
                  + '</div>';
              }} catch(e) {{}}
-             return false;"
-           style="
-               display:inline-block;
-               background:{bg};
-               color:{fg};
-               border:1px solid {border};
-               border-radius:6px;
-               padding:8px 20px;
-               font-size:14px;
-               font-weight:500;
-               font-family:sans-serif;
-               line-height:1.5;
-               text-decoration:none;
-               cursor:pointer;">
+             return false;">
           {safe_label}
         </a>
         """,
@@ -140,6 +152,30 @@ async def _get_connection_status(slack_user_id: str, slack_team_id: str) -> dict
 
 st.title("🔗 Connect Accounts")
 st.caption("Connect your Slack and GitHub accounts to enable activity tracking.")
+
+# Destructive styling for Disconnect buttons. Streamlit adds `st-key-{key}`
+# as a class on the element container when a button has `key=`, which lets us
+# scope the override to just these two buttons instead of all secondary ones.
+st.markdown(
+    """
+    <style>
+      .st-key-disconnect_slack button,
+      .st-key-disconnect_github button {
+        background-color: #d32f2f !important;
+        border-color: #d32f2f !important;
+        color: #ffffff !important;
+      }
+      .st-key-disconnect_slack button:hover,
+      .st-key-disconnect_github button:hover {
+        background-color: #b71c1c !important;
+        border-color: #b71c1c !important;
+        color: #ffffff !important;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.markdown("---")
 
 # ─── Slack ────────────────────────────────────────────────────────────────────
