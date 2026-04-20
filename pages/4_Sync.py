@@ -1236,12 +1236,12 @@ with _slack_btn_col1:
     )
 with _slack_btn_col2:
     sync_standup_clicked = st.button(
-        "Sync Daily Standup", type="secondary", key="sync_slack_standup",
+        "Sync Daily Standup", type="primary", key="sync_slack_standup",
         help="Sync only the daily-standup channel.",
     )
 with _slack_btn_col3:
     sync_both_clicked = st.button(
-        "Sync Both", type="secondary", key="sync_slack_both",
+        "Sync Both", type="primary", key="sync_slack_both",
         help="Run Sync Slack Messages and Sync Daily Standup back-to-back.",
     )
 
