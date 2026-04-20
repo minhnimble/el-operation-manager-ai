@@ -1093,11 +1093,19 @@ st.markdown("---")
 
 # Pin widget state so it survives navigation away from this page — Streamlit
 # drops keys for widgets that aren't currently rendered, which resets the
-# filters when the user switches tabs.
-for _persist_key in (
-    "sync_member_select", "date_mode", "days_slider", "days_input",
-    "date_range_input",
-):
+# filters when the user switches tabs. Defaults are seeded here so the widgets
+# can omit `value=`/`index=` (Streamlit rejects passing both a default and a
+# pre-set session_state value).
+_sync_filter_defaults = {
+    "date_mode":         "Last N days",
+    "days_slider":       90,
+    "days_input":        90,
+    "date_range_input":  (date.today() - timedelta(days=90), date.today()),
+}
+for _k, _v in _sync_filter_defaults.items():
+    st.session_state.setdefault(_k, _v)
+
+for _persist_key in ("sync_member_select", *_sync_filter_defaults.keys()):
     if _persist_key in st.session_state:
         st.session_state[_persist_key] = st.session_state[_persist_key]
 
