@@ -413,11 +413,19 @@ st.markdown("---")
 
 # Pin widget state so it survives navigation away from this page. Streamlit
 # garbage-collects widget keys for widgets that aren't currently rendered, so
-# a fresh read-and-write keeps each key registered in session_state.
-for _persist_key in (
-    "wr_team_member", "wr_date_preset", "wr_include_ai",
-    "wr_custom_start", "wr_custom_end",
-):
+# a fresh read-and-write keeps each key registered in session_state. Defaults
+# are seeded here (not on the widgets) because Streamlit rejects widgets that
+# pass both `value=`/`index=` and have a pre-set session_state value.
+_wr_filter_defaults = {
+    "wr_date_preset":  "Last 3 months",
+    "wr_include_ai":   True,
+    "wr_custom_start": date.today() - timedelta(days=90),
+    "wr_custom_end":   date.today(),
+}
+for _k, _v in _wr_filter_defaults.items():
+    st.session_state.setdefault(_k, _v)
+
+for _persist_key in ("wr_team_member", *_wr_filter_defaults.keys()):
     if _persist_key in st.session_state:
         st.session_state[_persist_key] = st.session_state[_persist_key]
 
@@ -486,22 +494,17 @@ with col2:
     preset = st.selectbox(
         "Date range",
         ["Last 30 days", "Last 3 months", "Last 6 months", "Custom"],
-        index=1,
         key="wr_date_preset",
     )
 
 with col3:
-    include_ai = st.toggle("AI insights", value=True, key="wr_include_ai")
+    include_ai = st.toggle("AI insights", key="wr_include_ai")
 
 # Custom date range
 if preset == "Custom":
     c1, c2 = st.columns(2)
-    start_date = c1.date_input(
-        "From", value=date.today() - timedelta(days=90), key="wr_custom_start",
-    )
-    end_date = c2.date_input(
-        "To", value=date.today(), key="wr_custom_end",
-    )
+    start_date = c1.date_input("From", key="wr_custom_start")
+    end_date = c2.date_input("To", key="wr_custom_end")
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time().replace(microsecond=0))
 else:

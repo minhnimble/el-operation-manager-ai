@@ -1193,10 +1193,10 @@ _date_mode = st.radio(
 if _date_mode == "Last N days":
     _d_col1, _d_col2 = st.columns([3, 1])
     with _d_col1:
-        _days = st.slider("Days to backfill", min_value=1, max_value=365, value=90, key="days_slider")
+        _days = st.slider("Days to backfill", min_value=1, max_value=365, key="days_slider")
     with _d_col2:
         _days = st.number_input(
-            "Or enter days", min_value=1, max_value=3650, value=_days,
+            "Or enter days", min_value=1, max_value=3650,
             key="days_input", label_visibility="visible",
         )
     sync_start: datetime = datetime.now(tz=None) - timedelta(days=_days)
@@ -1206,7 +1206,6 @@ else:
     _today = date.today()
     _range = st.date_input(
         "Select date range",
-        value=(_today - timedelta(days=90), _today),
         max_value=_today,
         key="date_range_input",
     )
