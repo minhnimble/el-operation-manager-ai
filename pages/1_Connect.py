@@ -213,15 +213,29 @@ if not slack_user_id:
     st.warning("Connect Slack first to enable GitHub linking.")
 else:
     from app.ui.page_utils import loading_section
-    with loading_section("Checking connection status…", n_skeleton_lines=2):
+
+    # Skip the "Checking connection status…" skeleton on the rerun that follows
+    # a disconnect — we already know the new state. Keeps the transition to a
+    # single visible loading phase (spinner during the delete) instead of
+    # flashing the stale "Connected" state twice.
+    if st.session_state.pop("_gh_just_disconnected", False):
         status = run(_get_connection_status(slack_user_id, slack_team_id))
+    else:
+        with loading_section("Checking connection status…", n_skeleton_lines=2):
+            status = run(_get_connection_status(slack_user_id, slack_team_id))
 
     if status["github_connected"]:
         col1, col2 = st.columns([4, 1])
-        col1.success(f"✅ Connected as **@{status['github_login']}**")
-        if col2.button("Disconnect", key="disconnect_github"):
-            run(_disconnect_github(slack_user_id, slack_team_id))
+        # Render the button *before* the success line so we can detect the
+        # click and suppress the stale "✅ Connected" render in the same rerun.
+        disconnect_clicked = col2.button("Disconnect", key="disconnect_github")
+        if disconnect_clicked:
+            with col1:
+                with st.spinner("Disconnecting GitHub…"):
+                    run(_disconnect_github(slack_user_id, slack_team_id))
+            st.session_state["_gh_just_disconnected"] = True
             st.rerun()
+        col1.success(f"✅ Connected as **@{status['github_login']}**")
 
         github_state = f"github:{slack_team_id}:{slack_user_id}"
         github_url = (
