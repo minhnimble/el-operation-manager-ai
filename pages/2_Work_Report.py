@@ -695,6 +695,10 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
                 _total = len(_lv.skills)
                 if _done == _total:
                     continue
+                # Skip levels where nothing has been started yet — they're
+                # aspirational rather than actionable for this report.
+                if _counts["todo"] == _total:
+                    continue
                 _is_current = (_curr == _lv.level)
                 _prefix = "⭐ " if _is_current else ""
                 st.markdown(
@@ -720,12 +724,13 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
                     st.markdown(f"**{_DT_STATUS_LABELS[_status]}**")
                     for _sk in _skills_here:
                         if _sk.note:
-                            # Inline italic note — expanders can't nest inside
-                            # the Activity Feed's parent expander elsewhere on
-                            # the page, so render notes as blockquoted text.
-                            st.markdown(f"- {_sk.text}  \n  > _{_sk.note}_")
+                            # Nested-list indentation (4 spaces) so the note
+                            # renders as a child bullet of its skill.
+                            st.markdown(
+                                f"- **{_sk.text}**\n    - _{_sk.note}_"
+                            )
                         else:
-                            st.markdown(f"- {_sk.text}")
+                            st.markdown(f"- **{_sk.text}**")
                 st.markdown("")  # spacer between levels
 
 st.markdown("---")
