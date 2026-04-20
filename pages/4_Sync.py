@@ -1091,6 +1091,16 @@ st.title("🔄 Sync Data")
 st.caption("Pull the latest Slack messages and GitHub activity into the database.")
 st.markdown("---")
 
+# Pin widget state so it survives navigation away from this page — Streamlit
+# drops keys for widgets that aren't currently rendered, which resets the
+# filters when the user switches tabs.
+for _persist_key in (
+    "sync_member_select", "date_mode", "days_slider", "days_input",
+    "date_range_input",
+):
+    if _persist_key in st.session_state:
+        st.session_state[_persist_key] = st.session_state[_persist_key]
+
 slack_user_id = st.session_state.get("slack_user_id")
 slack_team_id = st.session_state.get("slack_team_id")
 

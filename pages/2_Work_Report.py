@@ -6,7 +6,7 @@ with GitHub metrics, Slack activity, and AI work classification.
 """
 
 import asyncio
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 
 import streamlit as st
 
@@ -228,6 +228,44 @@ def _enrich_channel_map(
     return enriched
 
 
+def _collect_subteam_ids(items: list[dict]) -> set[str]:
+    """Return Slack user-group IDs referenced as ``<!subteam^S…>`` in message bodies."""
+    import re
+    ids: set[str] = set()
+    for item in items:
+        body = item.get("body") or item.get("title") or ""
+        for sid in re.findall(r"<!subteam\^([A-Z0-9]+)", body):
+            ids.add(sid)
+    return ids
+
+
+def _fetch_subteam_map(access_token: str) -> dict[str, str]:
+    """Fetch a {subteam_id: handle} map via ``usergroups.list``.
+
+    Handle (the @alias) is preferred over name for compact inline display.
+    Returns an empty dict if the call fails or the token lacks the
+    ``usergroups:read`` scope — callers fall back to the raw ID.
+    """
+    import requests
+    try:
+        resp = requests.get(
+            "https://slack.com/api/usergroups.list",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        data = resp.json()
+        if not data.get("ok"):
+            return {}
+        out: dict[str, str] = {}
+        for g in data.get("usergroups", []):
+            gid = g.get("id")
+            if gid:
+                out[gid] = g.get("handle") or g.get("name") or gid
+        return out
+    except Exception:
+        return {}
+
+
 @st.cache_data(show_spinner=False, max_entries=200)
 def _fetch_slack_image_bytes(url: str, token: str) -> bytes | None:
     """Fetch a Slack-hosted image with the user's Bearer token.
@@ -304,15 +342,22 @@ def _format_sender(item: dict, user_map: dict[str, str]) -> str:
     return "—"
 
 
-def _format_slack_text(text: str, user_map: dict[str, str]) -> str:
+def _format_slack_text(
+    text: str,
+    user_map: dict[str, str],
+    subteam_map: dict[str, str] | None = None,
+) -> str:
     """Convert Slack mrkdwn codes in message body to readable markdown.
 
     Handles:
-      <@USER_ID>            → @display_name  (or @USER_ID if unknown)
-      <#CHANNEL_ID|name>    → #name
-      <#CHANNEL_ID>         → #CHANNEL_ID
-      <URL|link text>       → [link text](URL)
-      <URL>                 → URL (bare link)
+      <@USER_ID>                    → @display_name  (or @USER_ID if unknown)
+      <#CHANNEL_ID|name>            → #name
+      <#CHANNEL_ID>                 → #CHANNEL_ID
+      <!subteam^SID|name>           → @name
+      <!subteam^SID>                → @handle        (or @SID if unknown)
+      <!here> / <!channel> / <!everyone> → @here / @channel / @everyone
+      <URL|link text>               → [link text](URL)
+      <URL>                         → URL (bare link)
     """
     import re
 
@@ -321,6 +366,21 @@ def _format_slack_text(text: str, user_map: dict[str, str]) -> str:
         uid = m.group(1)
         return f"@{user_map.get(uid, uid)}"
     text = re.sub(r"<@([A-Z0-9]+)>", _replace_user, text)
+
+    # Subteam (user-group) mentions  <!subteam^S123|name> or <!subteam^S123>
+    def _replace_subteam(m: re.Match) -> str:
+        sid, inline_name = m.group(1), m.group(2)
+        if inline_name:
+            return f"@{inline_name}"
+        if subteam_map and sid in subteam_map:
+            return f"@{subteam_map[sid]}"
+        return f"@{sid}"
+    text = re.sub(
+        r"<!subteam\^([A-Z0-9]+)(?:\|([^>]+))?>", _replace_subteam, text,
+    )
+
+    # Broadcast mentions  <!here>, <!channel>, <!everyone> (with optional |label)
+    text = re.sub(r"<!(here|channel|everyone)(?:\|[^>]+)?>", r"@\1", text)
 
     # Channel references  <#C123|name> or <#C123>
     text = re.sub(r"<#[A-Z0-9]+\|([^>]+)>", r"#\1", text)
@@ -350,6 +410,16 @@ async def _get_report(slack_user_id, slack_team_id, start, end, include_ai) -> W
 st.title("📊 Work Report")
 st.caption("Generate a structured activity report for any team member.")
 st.markdown("---")
+
+# Pin widget state so it survives navigation away from this page. Streamlit
+# garbage-collects widget keys for widgets that aren't currently rendered, so
+# a fresh read-and-write keeps each key registered in session_state.
+for _persist_key in (
+    "wr_team_member", "wr_date_preset", "wr_include_ai",
+    "wr_custom_start", "wr_custom_end",
+):
+    if _persist_key in st.session_state:
+        st.session_state[_persist_key] = st.session_state[_persist_key]
 
 # ─── Auth check ──────────────────────────────────────────────────────────────
 
@@ -400,9 +470,14 @@ with col1:
             st.session_state.pop("_report_members_cache", None)
             st.rerun()
     with _rcol1:
+        _opts = list(user_options.keys())
+        # Drop a stale persisted selection (member removed since last visit).
+        if st.session_state.get("wr_team_member") not in _opts:
+            st.session_state.pop("wr_team_member", None)
         selected_name = st.selectbox(
             "Team member",
-            options=list(user_options.keys()),
+            options=_opts,
+            key="wr_team_member",
             help="Add team members on the Team Overview page.",
         )
     target_user_id = user_options[selected_name]
@@ -412,21 +487,26 @@ with col2:
         "Date range",
         ["Last 30 days", "Last 3 months", "Last 6 months", "Custom"],
         index=1,
+        key="wr_date_preset",
     )
 
 with col3:
-    include_ai = st.toggle("AI insights", value=True)
+    include_ai = st.toggle("AI insights", value=True, key="wr_include_ai")
 
 # Custom date range
 if preset == "Custom":
     c1, c2 = st.columns(2)
-    start_date = c1.date_input("From", value=date.today() - timedelta(days=90))
-    end_date = c2.date_input("To", value=date.today())
+    start_date = c1.date_input(
+        "From", value=date.today() - timedelta(days=90), key="wr_custom_start",
+    )
+    end_date = c2.date_input(
+        "To", value=date.today(), key="wr_custom_end",
+    )
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time().replace(microsecond=0))
 else:
     days = {"Last 30 days": 30, "Last 3 months": 90, "Last 6 months": 180}[preset]
-    end_dt = datetime.utcnow()
+    end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
     start_dt = end_dt - timedelta(days=days)
 
 st.markdown("---")
@@ -438,6 +518,8 @@ if st.button("Generate Report", type="primary", use_container_width=False):
         try:
             report = run(_get_report(target_user_id, slack_team_id, start_dt, end_dt, include_ai))
             st.session_state["last_report"] = report
+            # New report invalidates the enrichment cache built for the prior one.
+            st.session_state.pop("_report_enrichment", None)
         except Exception as e:
             st.error(f"Failed to generate report: {e}")
             st.stop()
@@ -450,9 +532,22 @@ if not report:
 
 # ─── Display ──────────────────────────────────────────────────────────────────
 
-# Load user map + token in one loading section — these run every time a
-# report is displayed (not cached, since team membership changes often).
-with loading_section("Preparing report display…", n_skeleton_lines=3):
+# Load user map + token in one loading section — these run only when a new
+# report was just generated. Re-visits reuse the cached enrichment so there's
+# no spinner or redundant DB/API work on page navigation.
+_enrichment = st.session_state.get("_report_enrichment")
+_enrichment_matches = bool(
+    _enrichment and _enrichment.get("report_id") == id(report)
+)
+
+if _enrichment_matches:
+    _user_map    = _enrichment["user_map"]
+    _channel_map = _enrichment["channel_map"]
+    _subteam_map = _enrichment["subteam_map"]
+    _slack_token = _enrichment["slack_token"]
+    # Channel-name patching was already applied when the cache was built.
+else:
+  with loading_section("Preparing report display…", n_skeleton_lines=3):
     _user_map: dict[str, str] = run(_load_user_map(slack_team_id))
 
     _all_slack_msgs = [a for a in report.recent_activity if a.get("source") == "slack"]
@@ -470,6 +565,8 @@ with loading_section("Preparing report display…", n_skeleton_lines=3):
         for a in _all_slack_msgs
         if a.get("slack_channel_id") and a["slack_channel_id"] not in _channel_map
     }
+
+    _subteam_map: dict[str, str] = {}
 
     # Always fetch the Slack token — needed for image attachment fetching
     # (Slack file URLs are bearer-auth gated). Enrichment of unknown users /
@@ -495,14 +592,27 @@ with loading_section("Preparing report display…", n_skeleton_lines=3):
                 _user_map = _enrich_user_map(_user_map, _unknown_user_ids, _slack_token)
             if _unknown_channel_ids:
                 _channel_map = _enrich_channel_map(_channel_map, _unknown_channel_ids, _slack_token)
+            # Subteam names — only fetched when at least one message references one.
+            if _collect_subteam_ids(_all_slack_msgs):
+                _subteam_map = _fetch_subteam_map(_slack_token)
     except Exception:
         pass  # enrichment is best-effort; falls back to raw ID on any error
 
-# Patch channel_name in activity items using the enriched channel map
-for _a in report.recent_activity:
-    _cid = _a.get("slack_channel_id") or ""
-    if _cid and _cid in _channel_map:
-        _a["channel_name"] = _channel_map[_cid]
+    # Patch channel_name in activity items using the enriched channel map.
+    # Done once, inside the enrichment branch, so cached re-reads don't
+    # re-walk the list on every rerun.
+    for _a in report.recent_activity:
+        _cid = _a.get("slack_channel_id") or ""
+        if _cid and _cid in _channel_map:
+            _a["channel_name"] = _channel_map[_cid]
+
+    st.session_state["_report_enrichment"] = {
+        "report_id":   id(report),
+        "user_map":    _user_map,
+        "channel_map": _channel_map,
+        "subteam_map": _subteam_map,
+        "slack_token": _slack_token,
+    }
 
 st.subheader(f"Report: {report.user_display_name}")
 st.caption(f"Period: {report.date_range}")
@@ -633,7 +743,7 @@ with st.expander(f"Standups ({len(standups)})", expanded=len(standups) > 0):
             # Only show "(empty)" when there's also no attachment to render
             if not raw_text and not files:
                 raw_text = "(empty)"
-            body    = _format_standup_body(_format_slack_text(raw_text, _user_map)) if raw_text else ""
+            body    = _format_standup_body(_format_slack_text(raw_text, _user_map, _subteam_map)) if raw_text else ""
             ch_name = item.get("channel_name") or item.get("slack_channel_id") or ""
             ch      = f"#{ch_name}" if ch_name else ""
             _hdr_col, _btn_col = st.columns([8, 1])
@@ -704,7 +814,7 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
                 # Don't print "(empty)" when there's at least one attachment
                 if not raw_text and not files:
                     raw_text = "_(no text)_"
-                body = _format_slack_text(raw_text, _user_map) if raw_text else ""
+                body = _format_slack_text(raw_text, _user_map, _subteam_map) if raw_text else ""
 
                 col_icon, col_body, col_ts, col_copy = st.columns([0.3, 5, 1.5, 0.7])
                 col_icon.markdown(icon)
@@ -728,8 +838,8 @@ st.caption("Copy this text to share via Slack, email, or a doc. Click the copy i
 
 
 def _build_share_text(r: "WorkReport") -> str:
-    from datetime import datetime as _dt
-    generated = _dt.utcnow().strftime("%b %d, %Y")
+    from datetime import datetime as _dt, timezone as _tz
+    generated = _dt.now(_tz.utc).strftime("%b %d, %Y")
 
     def _pad(label: str, value: int, width: int = 22) -> str:
         dots = "." * max(1, width - len(label))
