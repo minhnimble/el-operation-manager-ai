@@ -60,6 +60,7 @@ groups:history         — read private channel messages
 groups:read            — list private channels
 users:read             — resolve user profiles
 users:read.email       — resolve user emails
+usergroups:read        — resolve @subteam mentions to group handles
 ```
 
 > These must be **User Token Scopes**, not Bot Token Scopes.

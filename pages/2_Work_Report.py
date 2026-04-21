@@ -245,16 +245,32 @@ def _fetch_subteam_map(access_token: str) -> dict[str, str]:
     Handle (the @alias) is preferred over name for compact inline display.
     Returns an empty dict if the call fails or the token lacks the
     ``usergroups:read`` scope — callers fall back to the raw ID.
+
+    ``include_disabled=true`` is important: archived/disabled groups still
+    appear in historical messages as ``<!subteam^SID>``, and Slack excludes
+    them by default, which produces ugly ``@SID`` renders for anything that
+    was ever retired.
     """
+    import logging
     import requests
+
+    logger = logging.getLogger(__name__)
     try:
         resp = requests.get(
             "https://slack.com/api/usergroups.list",
             headers={"Authorization": f"Bearer {access_token}"},
+            params={"include_disabled": "true"},
             timeout=10,
         )
         data = resp.json()
         if not data.get("ok"):
+            # Surface the Slack error so users understand why subteam
+            # mentions still show raw IDs (almost always missing scope).
+            logger.warning(
+                "usergroups.list failed: %s — add the 'usergroups:read' "
+                "User Token Scope to your Slack app and reconnect.",
+                data.get("error", "unknown"),
+            )
             return {}
         out: dict[str, str] = {}
         for g in data.get("usergroups", []):
@@ -262,7 +278,8 @@ def _fetch_subteam_map(access_token: str) -> dict[str, str]:
             if gid:
                 out[gid] = g.get("handle") or g.get("name") or gid
         return out
-    except Exception:
+    except Exception as e:
+        logger.warning("usergroups.list raised: %s", e)
         return {}
 
 
@@ -658,7 +675,7 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
         except Exception as e:
             _dt_load_error = str(e)
 
-    st.markdown("## 📈 Developer Track")
+    st.markdown("## 📈 Developer Track (in progress)")
     if _dt_load_error:
         st.warning(
             f"Could not load the developer-track sheet: {_dt_load_error}"
