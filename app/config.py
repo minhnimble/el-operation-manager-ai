@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     google_sheets_credentials_json: str = ""
     dev_track_sheet_id: str = ""
 
+    # Notion — Developer Track sync
+    # notion_api_key: Internal Integration Secret from Notion → Settings →
+    #   Connections → Develop or manage integrations.
+    # notion_dev_track_database_id: ID of the Notion database containing one
+    #   entry per developer. Copy from the database URL:
+    #   notion.so/.../{DATABASE_ID}?v=...
+    notion_api_key: str = ""
+    notion_dev_track_database_id: str = ""
+
     # Feature flags
     enable_ai_extraction: bool = True
     enable_burnout_detection: bool = False

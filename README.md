@@ -15,6 +15,7 @@ Turns Slack + GitHub activity into structured work analytics for Engineering Man
 - **AI classification** — Claude surfaces feature work, bug fixes, architecture, mentorship, and incidents
 - **Shareable reports** — activity feed, AI insights, and one-click copy summary per member
 - **Database cleanup** — remove ignored-channel data or stale member data in bulk
+- **Notion Dev Track Sync** — reads per-developer track pages from a Notion database and syncs skill status + objectives into the Google Sheet snapshot
 
 ---
 
@@ -27,6 +28,7 @@ Turns Slack + GitHub activity into structured work analytics for Engineering Man
 | Slack | Sign in with Slack — user OAuth (no bot, no webhooks) |
 | GitHub | GitHub REST API v3 — user OAuth |
 | AI | Anthropic Claude API |
+| Notion | Notion API v1 — Internal Integration token |
 | Migrations | Alembic |
 
 > **No Redis or Celery.** Syncs run in daemon threads within the Streamlit process.
@@ -40,6 +42,8 @@ Turns Slack + GitHub activity into structured work analytics for Engineering Man
 - A Slack OAuth app
 - A GitHub OAuth app
 - An Anthropic API key
+- A Google Cloud service account with Sheets API access — for Developer Track
+- A Notion Internal Integration token — for Notion Dev Track Sync
 
 ---
 
@@ -129,9 +133,13 @@ APP_SECRET_KEY  = "..."   # see note below
 
 ENABLE_AI_EXTRACTION = "true"
 
-# Optional — see "Developer Track (Google Sheets)" under Usage
+# See "Developer Track (Google Sheets)" under Usage
 GOOGLE_SHEETS_CREDENTIALS_JSON = ""
 DEV_TRACK_SHEET_ID             = ""
+
+# See "Notion Dev Track Sync" under Usage
+NOTION_API_KEY                = ""
+NOTION_DEV_TRACK_DATABASE_ID  = ""
 ```
 
 > **`APP_SECRET_KEY`** signs the session cookie that keeps you logged in across page navigations and OAuth redirects. Generate one with:
@@ -184,10 +192,10 @@ Go to **📊 Work Report**, select a member, choose a date range, and click **Ge
 
 - **Activity Feed** — commits, PRs, reviews, standups, all browsable
 - **AI Insights** — Claude-powered work classification and leadership summary
-- **Developer Track** — optional level + skill progress from a Google Sheet (see below)
+- **Developer Track** — level + skill progress from a Google Sheet (see below)
 - **Share Summary** — one-click copy for Slack, email, or docs
 
-### Optional: Developer Track (Google Sheets)
+### Developer Track (Google Sheets)
 
 Shows each member's skill-vetting progress in the Work Report. Cell background colors drive status (green = vetted, blue = in progress, purple = proposed, yellow = focus, white = not started); cell notes render inline.
 
@@ -201,12 +209,59 @@ Shows each member's skill-vetting progress in the Work Report. Cell background c
 **Setup:**
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), enable the **Google Sheets API** and create a **Service Account** (no roles needed). Add a **JSON key** — a file downloads.
-2. In the sheet, click **Share** and grant **Viewer** to the key's `client_email`.
+2. In the sheet, click **Share** and grant **Editor** to the key's `client_email` (Editor is required so the Notion Dev Track Sync can write back).
 3. Set `GOOGLE_SHEETS_CREDENTIALS_JSON` (full JSON as a single-line string) and `DEV_TRACK_SHEET_ID` (URL segment between `/d/` and `/edit`) in secrets / `.env`. Reboot.
 
 > **TOML tip:** wrap the JSON in single quotes so its double quotes parse; leave `\n` in `private_key` as-is.
 
 Troubleshooting: *"No developer-track tab found"* → rename the tab to include the member's first name, last name, or full name as it appears in Slack. *"Caller does not have permission"* → share the sheet with `client_email`. *"not valid JSON"* → re-copy the full file, single-quote-wrapped.
+
+### Notion Dev Track Sync
+
+Reads per-developer track data from a **Notion database** and writes skill statuses,
+objectives, and evidence notes into the matching Google Sheet tab. Notion is always
+treated as the source of truth; the Sheet is the snapshot.
+
+**Notion database setup:**
+
+- Each database entry represents one developer.
+- Page title format: `{developer name} <> {manager name}` — e.g. `Don <> Mike`.
+- Each page body must contain a `## Skills Development` section with `### Level N`
+  headings, toggle/bullet skills (bold), and `- [ ]` / `- [x]` to-do objectives.
+- Optionally add a `## Focus Areas` section with bulleted skill names; those skills
+  get "focus" (yellow) status in the Sheet.
+
+**Setup:**
+
+1. In Notion: **Settings** → **Connections** → **Develop or manage integrations**
+   → **New integration**. Set type to **Internal**, copy the **Internal Integration
+   Secret**.
+2. Share the Notion database with the integration (open the database → ··· →
+   **Connections** → add your integration).
+3. Copy the database ID from its URL: `notion.so/.../{DATABASE_ID}?v=...`.
+4. Set `NOTION_API_KEY` (integration secret) and `NOTION_DEV_TRACK_DATABASE_ID`
+   in secrets / `.env`.
+5. Re-share the Google Sheet with the service account as **Editor**
+   (Viewer was enough for the Work Report read path; writes need Editor).
+6. Navigate to **📋 Notion Dev Track Sync** in the app → **Fetch from Notion** →
+   preview matches → **Sync**.
+
+**Sync behaviour:**
+
+- Notion is always the source of truth; the Sheet is the snapshot.
+- Skills in Notion but not yet in the Sheet → added.
+- Skills in the Sheet but not in Notion → left untouched (no deletions).
+- Note wording mismatch between Notion and Sheet → Notion's version wins.
+- **Status is derived from objective phrasing** (highest priority first):
+  1. Any unchecked objective uses a V-ing verb ("Working as…", "Raising…") or
+     starts with "In-progress/In-review objective" → **blue** (in progress)
+  2. Any unchecked objective has "New objective:" prefix, no V-ing → **yellow**
+     (focus / ready to start)
+  3. All objectives checked and current Sheet cell is blue or yellow → **white**
+     (downgrade to not started)
+  4. Current Sheet cell is green (completed) or purple (proposed) → **unchanged**
+- The Notion **Focus Areas** section is kept in sync: in-progress and focus skills
+  are added automatically; skills downgraded to not-started are removed.
 
 ---
 
@@ -296,15 +351,17 @@ pages/
 ├── 1_Connect.py               # Slack + GitHub OAuth linking
 ├── 2_Work_Report.py           # Work reports — charts, feed, share summary
 ├── 3_Team_Overview.py         # Team management — add/remove/edit members
-└── 4_Sync.py                  # Slack + GitHub sync with background progress
+├── 4_Sync.py                  # Slack + GitHub sync with background progress
+└── 5_Notion_Dev_Track.py      # Notion dev track preview, diff, and sync
 app/
 ├── config.py                  # Settings (pydantic-settings + .env)
 ├── database.py                # SQLAlchemy async engine + session
 ├── models/                    # SlackMessage, GitHubActivity, WorkUnit, etc.
 ├── ingestion/                 # Slack + GitHub data ingestion
 ├── normalization/             # Raw → WorkUnit normalizer
-├── analytics/                 # Report aggregation
+├── analytics/                 # Report aggregation + Notion dev track parser/sync
 ├── ai/                        # Claude-powered classification + insights
+├── integrations/              # Google Sheets + Notion async clients
 ├── slack/                     # OAuth flow + workspace user listing
 └── github/                    # OAuth exchange + user linking
 ```

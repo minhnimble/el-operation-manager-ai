@@ -31,6 +31,9 @@ anthropic==0.40.0
 google-api-python-client==2.151.0
 google-auth==2.36.0
 
+# Notion (developer track sync)
+notion-client==2.2.1
+
 # Auth / Security
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
