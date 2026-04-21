@@ -723,14 +723,23 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
                         continue
                     st.markdown(f"**{_DT_STATUS_LABELS[_status]}**")
                     for _sk in _skills_here:
+                        _lines = [f"- **{_sk.text}**"]
                         if _sk.note:
-                            # Nested-list indentation (4 spaces) so the note
-                            # renders as a child bullet of its skill.
-                            st.markdown(
-                                f"- **{_sk.text}**\n    - _{_sk.note}_"
-                            )
-                        else:
-                            st.markdown(f"- **{_sk.text}**")
+                            # Notes are usually a bulleted list (each line
+                            # starts with "-"). Render every non-blank line as
+                            # a nested child bullet of the skill, stripping
+                            # the existing bullet marker so markdown renders
+                            # clean nesting instead of literal dashes.
+                            for _raw in _sk.note.splitlines():
+                                _s = _raw.strip()
+                                if not _s:
+                                    continue
+                                if _s.startswith(("- ", "* ")):
+                                    _s = _s[2:].strip()
+                                elif _s.startswith(("-", "*")):
+                                    _s = _s[1:].strip()
+                                _lines.append(f"    - {_s}")
+                        st.markdown("\n".join(_lines))
                 st.markdown("")  # spacer between levels
 
 st.markdown("---")
