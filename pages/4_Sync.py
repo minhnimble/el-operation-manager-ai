@@ -1202,22 +1202,47 @@ if _date_mode == "Last N days":
         st.session_state["days_slider"] = min(max(v, 1), 365)
 
     _d_col1, _d_col2 = st.columns([3, 1])
-    # When the input exceeds the slider's max, label it "365+" so the slider
-    # still reflects that "more than max" state instead of silently snapping
-    # back to 365.
     _input_days = int(st.session_state["days_input"])
-    _slider_label = (
-        f"Days to backfill — **365+** ({_input_days} days)"
-        if _input_days > 365
-        else "Days to backfill"
-    )
     with _d_col1:
         st.slider(
-            _slider_label,
+            "Days to backfill",
             min_value=1, max_value=365,
             key="days_slider",
             on_change=_sync_days_from_slider,
         )
+        # When the input exceeds the slider's max, rewrite the two numeric
+        # labels Streamlit renders inside this slider:
+        #   • thumb value (top)  → the actual entered days (e.g. "500")
+        #   • max tick   (bottom) → "365+"
+        # Streamlit's `format` param only affects the thumb value, and it
+        # can't diverge from the clamped slider value, so we override both
+        # via scoped CSS on the `st-key-days_slider` wrapper.
+        if _input_days > 365:
+            st.markdown(
+                f"""
+                <style>
+                .st-key-days_slider [data-testid="stThumbValue"] {{
+                    visibility: hidden; position: relative;
+                }}
+                .st-key-days_slider [data-testid="stThumbValue"]::after {{
+                    content: "{_input_days}";
+                    visibility: visible;
+                    position: absolute;
+                    right: 0; top: 0;
+                }}
+                .st-key-days_slider [data-testid="stTickBarMax"] {{
+                    visibility: hidden; position: relative;
+                }}
+                .st-key-days_slider [data-testid="stTickBarMax"]::after {{
+                    content: "365+";
+                    visibility: visible;
+                    position: absolute;
+                    right: 0; top: 0;
+                }}
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
     with _d_col2:
         st.number_input(
             "Or enter days", min_value=1, max_value=3650,
