@@ -47,9 +47,11 @@ STATUS_LABELS: dict[SkillStatus, str] = {
     "todo":        "⬜ Not started",
 }
 
-# Order we render statuses in the UI — progress-first, then aspirational.
+# Order we render statuses in the UI. Focus / in-progress / not-started come
+# first because those are the skills that need attention; vetting state and
+# already-completed skills sink to the bottom.
 STATUS_ORDER: list[SkillStatus] = [
-    "completed", "in_progress", "proposed", "focus", "todo",
+    "focus", "in_progress", "todo", "proposed", "completed",
 ]
 
 
