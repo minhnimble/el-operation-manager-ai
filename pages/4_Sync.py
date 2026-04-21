@@ -1202,9 +1202,18 @@ if _date_mode == "Last N days":
         st.session_state["days_slider"] = min(max(v, 1), 365)
 
     _d_col1, _d_col2 = st.columns([3, 1])
+    # When the input exceeds the slider's max, label it "365+" so the slider
+    # still reflects that "more than max" state instead of silently snapping
+    # back to 365.
+    _input_days = int(st.session_state["days_input"])
+    _slider_label = (
+        f"Days to backfill — **365+** ({_input_days} days)"
+        if _input_days > 365
+        else "Days to backfill"
+    )
     with _d_col1:
         st.slider(
-            "Days to backfill",
+            _slider_label,
             min_value=1, max_value=365,
             key="days_slider",
             on_change=_sync_days_from_slider,
