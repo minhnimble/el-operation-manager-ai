@@ -725,20 +725,27 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
                     for _sk in _skills_here:
                         _lines = [f"- **{_sk.text}**"]
                         if _sk.note:
-                            # Notes are usually a bulleted list (each line
-                            # starts with "-"). Render every non-blank line as
-                            # a nested child bullet of the skill, stripping
-                            # the existing bullet marker so markdown renders
-                            # clean nesting instead of literal dashes.
+                            # Notes are bulleted lists where `-` marks a
+                            # top-level item and `+` marks a sub-item under
+                            # the previous `-`. We translate both into nested
+                            # markdown lists: `-` → 4-space indent (child of
+                            # the skill), `+` → 8-space indent (grandchild).
                             for _raw in _sk.note.splitlines():
                                 _s = _raw.strip()
                                 if not _s:
                                     continue
-                                if _s.startswith(("- ", "* ")):
+                                if _s.startswith(("+ ", "+")):
+                                    _s = _s[1:].lstrip()
+                                    _indent = "        "  # 8 spaces
+                                elif _s.startswith(("- ", "* ")):
                                     _s = _s[2:].strip()
+                                    _indent = "    "      # 4 spaces
                                 elif _s.startswith(("-", "*")):
                                     _s = _s[1:].strip()
-                                _lines.append(f"    - {_s}")
+                                    _indent = "    "
+                                else:
+                                    _indent = "    "
+                                _lines.append(f"{_indent}- {_s}")
                         st.markdown("\n".join(_lines))
                 st.markdown("")  # spacer between levels
 
