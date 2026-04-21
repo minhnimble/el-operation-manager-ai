@@ -1191,14 +1191,32 @@ _date_mode = st.radio(
 )
 
 if _date_mode == "Last N days":
+    # Keep the slider and number input in sync: whichever the user changes
+    # last drives the other. The input accepts up to 3650 days while the
+    # slider maxes at 365, so we clamp on the slider side to stay valid.
+    def _sync_days_from_slider() -> None:
+        st.session_state["days_input"] = st.session_state["days_slider"]
+
+    def _sync_days_from_input() -> None:
+        v = int(st.session_state["days_input"])
+        st.session_state["days_slider"] = min(max(v, 1), 365)
+
     _d_col1, _d_col2 = st.columns([3, 1])
     with _d_col1:
-        _days = st.slider("Days to backfill", min_value=1, max_value=365, key="days_slider")
+        st.slider(
+            "Days to backfill",
+            min_value=1, max_value=365,
+            key="days_slider",
+            on_change=_sync_days_from_slider,
+        )
     with _d_col2:
-        _days = st.number_input(
+        st.number_input(
             "Or enter days", min_value=1, max_value=3650,
             key="days_input", label_visibility="visible",
+            on_change=_sync_days_from_input,
         )
+    # `days_input` is the canonical source — it covers the full 1–3650 range.
+    _days = int(st.session_state["days_input"])
     sync_start: datetime = datetime.now(tz=None) - timedelta(days=_days)
     sync_end: datetime | None = None
     st.caption(f"From **{sync_start.strftime('%b %d, %Y')}** to **now**.")
