@@ -140,6 +140,7 @@ DEV_TRACK_SHEET_ID             = ""
 # See "Notion Dev Track Sync" under Usage
 NOTION_API_KEY                = ""
 NOTION_DEV_TRACK_DATABASE_ID  = ""
+NOTION_DEV_TRACK_VIEW_ID      = ""  # optional — filter by a specific view
 ```
 
 > **`APP_SECRET_KEY`** signs the session cookie that keeps you logged in across page navigations and OAuth redirects. Generate one with:
@@ -238,13 +239,20 @@ treated as the source of truth; the Sheet is the snapshot.
    Secret**.
 2. Share the Notion database with the integration (open the database → ··· →
    **Connections** → add your integration).
-3. Copy the database ID from its URL: `notion.so/.../{DATABASE_ID}?v=...`.
-4. Set `NOTION_API_KEY` (integration secret) and `NOTION_DEV_TRACK_DATABASE_ID`
-   in secrets / `.env`.
-5. Re-share the Google Sheet with the service account as **Editor**
+3. Copy the database ID from its URL: `notion.so/.../{DATABASE_ID}?v={VIEW_ID}`.
+4. (Optional) Copy the view ID — the `v=` segment of the same URL — if you
+   want the sync to mirror a specific Notion view's filter + sort (e.g. only
+   active developers). Leave blank to sync every page in the database.
+5. Set `NOTION_API_KEY` (integration secret), `NOTION_DEV_TRACK_DATABASE_ID`,
+   and optionally `NOTION_DEV_TRACK_VIEW_ID` in secrets / `.env`.
+6. Re-share the Google Sheet with the service account as **Editor**
    (Viewer was enough for the Work Report read path; writes need Editor).
-6. Navigate to **📋 Notion Dev Track Sync** in the app → **Fetch from Notion** →
+7. Navigate to **📋 Notion Dev Track Sync** in the app → **Fetch from Notion** →
    preview matches → **Sync**.
+
+> **View-based filtering** uses Notion's Views API (`/v1/views/{view_id}/queries`,
+> `Notion-Version: 2026-03-11`). Your integration must have access to the
+> parent database; shared-view access is inherited from the database share.
 
 **Sync behaviour:**
 

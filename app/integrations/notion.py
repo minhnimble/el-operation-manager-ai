@@ -65,6 +65,27 @@ def _client() -> AsyncClient:
     return AsyncClient(auth=settings.notion_api_key)
 
 
+# Views API requires API version 2026-03-11+. We keep the default client
+# pinned to the stable 2022-06-28 version (that's what the rest of our
+# block/page code is written against) and route view queries through a
+# dedicated client so a newer version header doesn't regress other calls.
+_VIEW_API_VERSION = "2026-03-11"
+
+
+@lru_cache(maxsize=1)
+def _view_client() -> AsyncClient:
+    settings = get_settings()
+    if not settings.notion_api_key:
+        raise RuntimeError(
+            "NOTION_API_KEY is not set. See README → "
+            "'Notion Dev Track Sync' for setup."
+        )
+    return AsyncClient(
+        auth=settings.notion_api_key,
+        notion_version=_VIEW_API_VERSION,
+    )
+
+
 # ── Title / name helpers ─────────────────────────────────────────────────────
 
 
@@ -100,17 +121,30 @@ def _concat_rich_text(rich_text: list[dict[str, Any]]) -> str:
 # ── Database query ───────────────────────────────────────────────────────────
 
 
-async def fetch_database_entries(database_id: str) -> list[dict[str, Any]]:
-    """Query every page in the database. Handles Notion's 100-entry pagination.
+async def fetch_database_entries(
+    database_id: str,
+    view_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Query pages in the database. Handles Notion's 100-entry pagination.
+
+    * ``view_id`` (optional) — if set, uses Notion's view-query endpoint to
+      return only the pages that match the view's saved filter + sort (same
+      rows visible in the Notion UI for that view). Otherwise every page in
+      the database is returned.
 
     Returns raw page objects (id, properties, …) — the caller is responsible
-    for extracting titles and fetching block children.
+    for extracting titles and fetching block children. The view endpoint
+    returns page *references* (id only), so we retrieve each page's full
+    object here to keep the shape consistent for callers.
     """
-    if not database_id:
+    if not database_id and not view_id:
         raise RuntimeError(
             "NOTION_DEV_TRACK_DATABASE_ID is not set. Paste the database ID "
             "(the part of the URL after the workspace slug and before ``?v=``)."
         )
+
+    if view_id:
+        return await _fetch_view_entries(view_id)
 
     client = _client()
     pages: list[dict[str, Any]] = []
@@ -128,6 +162,61 @@ async def fetch_database_entries(database_id: str) -> list[dict[str, Any]]:
         if not start_cursor:
             break
 
+    return pages
+
+
+async def _fetch_view_entries(view_id: str) -> list[dict[str, Any]]:
+    """Run a view's saved filter/sort and return full page objects.
+
+    Flow (three-step, per Notion's Views API):
+
+    1. ``POST /views/{view_id}/queries`` — creates a cached query, returns
+       the first page of page references plus a ``query_id``.
+    2. ``GET  /views/{view_id}/queries/{query_id}`` — paginates through the
+       cached result set (cache expires after 15 minutes; if we hit that,
+       we restart by creating a fresh query).
+    3. ``pages.retrieve`` — the view endpoint returns page *references*
+       (``{object: "page", id: ...}``), so we fetch the full page object
+       for each reference so downstream code can read titles/properties.
+    """
+    view_client = _view_client()
+
+    try:
+        first = await view_client.request(
+            path=f"views/{view_id}/queries",
+            method="POST",
+            body={"page_size": 100},
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to run Notion view query for view_id={view_id!r}: {e}. "
+            "Double-check NOTION_DEV_TRACK_VIEW_ID and make sure the "
+            "integration is shared on the parent database."
+        ) from e
+
+    query_id = first.get("id")
+    page_refs: list[dict[str, Any]] = list(first.get("results") or [])
+    has_more = bool(first.get("has_more"))
+    next_cursor = first.get("next_cursor")
+
+    while has_more and next_cursor and query_id:
+        resp = await view_client.request(
+            path=f"views/{view_id}/queries/{query_id}",
+            method="GET",
+            query={"start_cursor": next_cursor, "page_size": 100},
+        )
+        page_refs.extend(resp.get("results") or [])
+        has_more = bool(resp.get("has_more"))
+        next_cursor = resp.get("next_cursor")
+
+    client = _client()
+    pages: list[dict[str, Any]] = []
+    for ref in page_refs:
+        pid = ref.get("id")
+        if not pid:
+            continue
+        page = await client.pages.retrieve(page_id=pid)
+        pages.append(page)
     return pages
 
 

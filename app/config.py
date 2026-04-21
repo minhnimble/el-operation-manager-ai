@@ -44,9 +44,14 @@ class Settings(BaseSettings):
     #   Connections → Develop or manage integrations.
     # notion_dev_track_database_id: ID of the Notion database containing one
     #   entry per developer. Copy from the database URL:
-    #   notion.so/.../{DATABASE_ID}?v=...
+    #   notion.so/.../{DATABASE_ID}?v={VIEW_ID}
+    # notion_dev_track_view_id (optional): if set, we use Notion's view-query
+    #   endpoint to fetch only the pages that match the view's saved filter +
+    #   sort (same rows the user sees in that Notion view). Leave blank to
+    #   fetch every page in the database. This is the `v=` part of the URL.
     notion_api_key: str = ""
     notion_dev_track_database_id: str = ""
+    notion_dev_track_view_id: str = ""
 
     # Feature flags
     enable_ai_extraction: bool = True

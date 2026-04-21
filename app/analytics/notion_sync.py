@@ -144,16 +144,23 @@ def _compute_focus_area_diff(
 async def collect_sync_plan(
     spreadsheet_id: str,
     database_id: str,
+    view_id: str | None = None,
 ) -> tuple[list[SheetTab], list[MemberSyncPlan]]:
     """Build one ``MemberSyncPlan`` per developer in the Notion database.
 
     Side-effect-free: fetches from Notion and Google Sheets, parses everything,
     computes diffs. No writes. Suitable for populating a preview UI.
 
+    If ``view_id`` is provided, only the pages matching that Notion view's
+    saved filter + sort are processed. Otherwise every page in the database
+    is considered.
+
     Returns ``(all_sheet_tabs, plans)`` so callers can also show a list of
     "members in the sheet but not in Notion" (tabs with no matching plan).
     """
-    entries = await notion_api.fetch_database_entries(database_id)
+    entries = await notion_api.fetch_database_entries(
+        database_id, view_id=view_id
+    )
     tabs = fetch_all_tabs(spreadsheet_id)
 
     plans: list[MemberSyncPlan] = []

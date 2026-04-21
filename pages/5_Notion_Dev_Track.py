@@ -63,17 +63,31 @@ st.caption(
 
 settings = get_settings()
 
+# NOTION_DEV_TRACK_VIEW_ID is optional — when set, we only pull pages that
+# match the view's saved filter + sort. Shown for visibility but not required.
 _config_rows = [
-    ("NOTION_API_KEY",               bool(settings.notion_api_key)),
-    ("NOTION_DEV_TRACK_DATABASE_ID", bool(settings.notion_dev_track_database_id)),
-    ("GOOGLE_SHEETS_CREDENTIALS_JSON", bool(settings.google_sheets_credentials_json)),
-    ("DEV_TRACK_SHEET_ID",           bool(settings.dev_track_sheet_id)),
+    ("NOTION_API_KEY",               bool(settings.notion_api_key), True),
+    ("NOTION_DEV_TRACK_DATABASE_ID", bool(settings.notion_dev_track_database_id), True),
+    ("NOTION_DEV_TRACK_VIEW_ID",     bool(settings.notion_dev_track_view_id), False),
+    ("GOOGLE_SHEETS_CREDENTIALS_JSON", bool(settings.google_sheets_credentials_json), True),
+    ("DEV_TRACK_SHEET_ID",           bool(settings.dev_track_sheet_id), True),
 ]
 cols = st.columns(len(_config_rows))
-for col, (label, ok) in zip(cols, _config_rows):
-    col.markdown(f"{'✅' if ok else '❌'} `{label}`")
+for col, (label, ok, required) in zip(cols, _config_rows):
+    if ok:
+        icon = "✅"
+    else:
+        icon = "❌" if required else "⚪"
+    suffix = "" if required else "  _(optional)_"
+    col.markdown(f"{icon} `{label}`{suffix}")
 
-if not all(ok for _, ok in _config_rows):
+if settings.notion_dev_track_view_id:
+    st.caption(
+        f"Filtering Notion database by view `{settings.notion_dev_track_view_id}` "
+        "— only pages matching that view's saved filter + sort will be synced."
+    )
+
+if not all(ok for _, ok, required in _config_rows if required):
     st.warning(
         "Some configuration is missing. See **README → Notion Dev Track "
         "Sync** for setup instructions. The service account also needs "
@@ -122,6 +136,7 @@ def _fetch_plans() -> None:
         collect_sync_plan(
             spreadsheet_id=settings.dev_track_sheet_id,
             database_id=settings.notion_dev_track_database_id,
+            view_id=settings.notion_dev_track_view_id or None,
         )
     )
     st.session_state[_FETCH_KEY] = plans
