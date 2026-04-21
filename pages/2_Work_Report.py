@@ -743,53 +743,57 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
                     continue
                 _is_current = (_curr == _lv.level)
                 _prefix = "⭐ " if _is_current else ""
-                st.markdown(
-                    f"### {_prefix}Level {_lv.level} — {_lv.title or '(untitled)'}"
+                # Collapsible per-level card — mirrors the standups/messages
+                # UX. The member's current level opens by default; the rest
+                # collapse so the page stays scannable.
+                _exp_label = (
+                    f"{_prefix}Level {_lv.level} — "
+                    f"{_lv.title or '(untitled)'}  ·  {_done}/{_total} vetted"
                 )
-                st.progress(
-                    _done / _total if _total else 0.0,
-                    text=f"{_done}/{_total} vetted",
-                )
-                # Status breakdown pills
-                _summary_parts = [
-                    f"{_DT_STATUS_LABELS[s]}: **{_counts[s]}**"
-                    for s in _DT_STATUS_ORDER if _counts[s]
-                ]
-                if _summary_parts:
-                    st.caption(" · ".join(_summary_parts))
+                with st.expander(_exp_label, expanded=_is_current):
+                    st.progress(
+                        _done / _total if _total else 0.0,
+                        text=f"{_done}/{_total} vetted",
+                    )
+                    # Status breakdown pills
+                    _summary_parts = [
+                        f"{_DT_STATUS_LABELS[s]}: **{_counts[s]}**"
+                        for s in _DT_STATUS_ORDER if _counts[s]
+                    ]
+                    if _summary_parts:
+                        st.caption(" · ".join(_summary_parts))
 
-                # Skills grouped by status — progress-first ordering.
-                for _status in _DT_STATUS_ORDER:
-                    _skills_here = [s for s in _lv.skills if s.status == _status]
-                    if not _skills_here:
-                        continue
-                    st.markdown(f"**{_DT_STATUS_LABELS[_status]}**")
-                    for _sk in _skills_here:
-                        _lines = [f"- **{_sk.text}**"]
-                        if _sk.note:
-                            # Notes are bulleted lists where `-` marks a
-                            # top-level item and `+` marks a sub-item under
-                            # the previous `-`. We translate both into nested
-                            # markdown lists: `-` → 4-space indent (child of
-                            # the skill), `+` → 8-space indent (grandchild).
-                            for _raw in _sk.note.splitlines():
-                                _s = _raw.strip()
-                                if not _s:
-                                    continue
-                                if _s.startswith(("+ ", "+")):
-                                    _s = _s[1:].lstrip()
-                                    _indent = "        "  # 8 spaces
-                                elif _s.startswith(("- ", "* ")):
-                                    _s = _s[2:].strip()
-                                    _indent = "    "      # 4 spaces
-                                elif _s.startswith(("-", "*")):
-                                    _s = _s[1:].strip()
-                                    _indent = "    "
-                                else:
-                                    _indent = "    "
-                                _lines.append(f"{_indent}- {_s}")
-                        st.markdown("\n".join(_lines))
-                st.markdown("")  # spacer between levels
+                    # Skills grouped by status — progress-first ordering.
+                    for _status in _DT_STATUS_ORDER:
+                        _skills_here = [s for s in _lv.skills if s.status == _status]
+                        if not _skills_here:
+                            continue
+                        st.markdown(f"**{_DT_STATUS_LABELS[_status]}**")
+                        for _sk in _skills_here:
+                            _lines = [f"- **{_sk.text}**"]
+                            if _sk.note:
+                                # Notes are bulleted lists where `-` marks a
+                                # top-level item and `+` marks a sub-item under
+                                # the previous `-`. We translate both into nested
+                                # markdown lists: `-` → 4-space indent (child of
+                                # the skill), `+` → 8-space indent (grandchild).
+                                for _raw in _sk.note.splitlines():
+                                    _s = _raw.strip()
+                                    if not _s:
+                                        continue
+                                    if _s.startswith(("+ ", "+")):
+                                        _s = _s[1:].lstrip()
+                                        _indent = "        "  # 8 spaces
+                                    elif _s.startswith(("- ", "* ")):
+                                        _s = _s[2:].strip()
+                                        _indent = "    "      # 4 spaces
+                                    elif _s.startswith(("-", "*")):
+                                        _s = _s[1:].strip()
+                                        _indent = "    "
+                                    else:
+                                        _indent = "    "
+                                    _lines.append(f"{_indent}- {_s}")
+                            st.markdown("\n".join(_lines))
 
 st.markdown("---")
 
