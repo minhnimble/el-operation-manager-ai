@@ -556,8 +556,19 @@ if not report:
 # report was just generated. Re-visits reuse the cached enrichment so there's
 # no spinner or redundant DB/API work on page navigation.
 _enrichment = st.session_state.get("_report_enrichment")
+# Bust a stale cache when we previously failed to resolve subteam mentions
+# but the user has since reconnected Slack with the `usergroups:read` scope.
+# Without this, the empty `subteam_map` persists for the life of the report
+# and @group mentions keep rendering as raw IDs even after reconnect.
+_enrichment_stale = bool(
+    _enrichment
+    and _enrichment.get("subteam_ids_seen")
+    and not _enrichment.get("subteam_map")
+)
 _enrichment_matches = bool(
-    _enrichment and _enrichment.get("report_id") == id(report)
+    _enrichment
+    and _enrichment.get("report_id") == id(report)
+    and not _enrichment_stale
 )
 
 if _enrichment_matches:
@@ -587,6 +598,7 @@ else:
     }
 
     _subteam_map: dict[str, str] = {}
+    _subteam_ids_seen: set[str] = set()
 
     # Always fetch the Slack token — needed for image attachment fetching
     # (Slack file URLs are bearer-auth gated). Enrichment of unknown users /
@@ -613,8 +625,20 @@ else:
             if _unknown_channel_ids:
                 _channel_map = _enrich_channel_map(_channel_map, _unknown_channel_ids, _slack_token)
             # Subteam names — only fetched when at least one message references one.
-            if _collect_subteam_ids(_all_slack_msgs):
+            _subteam_ids_seen = _collect_subteam_ids(_all_slack_msgs)
+            if _subteam_ids_seen:
                 _subteam_map = _fetch_subteam_map(_slack_token)
+                # Warn the user when we know which subteams are referenced
+                # but couldn't resolve any — almost always the scope issue.
+                _missing = _subteam_ids_seen - set(_subteam_map.keys())
+                if _missing and not _subteam_map:
+                    st.warning(
+                        "Some @user-group mentions are showing as raw IDs "
+                        "(e.g. `@S05…`). Add the **`usergroups:read`** "
+                        "scope to your Slack app and click **Reconnect "
+                        "Slack** on the 🔗 Connect Accounts page, then "
+                        "regenerate this report."
+                    )
     except Exception:
         pass  # enrichment is best-effort; falls back to raw ID on any error
 
@@ -627,11 +651,12 @@ else:
             _a["channel_name"] = _channel_map[_cid]
 
     st.session_state["_report_enrichment"] = {
-        "report_id":   id(report),
-        "user_map":    _user_map,
-        "channel_map": _channel_map,
-        "subteam_map": _subteam_map,
-        "slack_token": _slack_token,
+        "report_id":        id(report),
+        "user_map":         _user_map,
+        "channel_map":      _channel_map,
+        "subteam_map":      _subteam_map,
+        "subteam_ids_seen": _subteam_ids_seen,
+        "slack_token":      _slack_token,
     }
 
 st.subheader(f"Report: {report.user_display_name}")
@@ -700,7 +725,7 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
                 f"**Tab:** `{_dt_track.tab_title}`"
             )
             if _curr is not None:
-                _hdr_cols[1].metric("Current level", _curr)
+                _hdr_cols[1].metric("Latest working level", _curr)
 
             # Render levels high → low, and hide fully-vetted levels so the
             # report focuses on what's still in progress or ahead.
