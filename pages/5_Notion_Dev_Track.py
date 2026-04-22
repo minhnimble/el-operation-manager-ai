@@ -103,6 +103,16 @@ if not all(ok for _, ok, required in _config_rows if required):
 # ── Member selector (reports only — exclude self) ────────────────────────────
 
 
+def _run_async(coro):
+    """Run an async coroutine in a Streamlit callback."""
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 slack_user_id = st.session_state.get("slack_user_id")
 slack_team_id = st.session_state.get("slack_team_id")
 
@@ -163,20 +173,6 @@ if not selected_members:
 _FETCH_KEY = "notion_sync_plans"
 _RESULTS_KEY = "notion_sync_results"
 _LAST_FETCH_KEY = "notion_sync_last_fetch"
-
-
-def _run_async(coro):
-    """Run an async coroutine in a Streamlit callback.
-
-    Streamlit runs the script in a normal thread (no event loop), so we open
-    a loop per call. This is the same pattern used by ``4_Sync.py``.
-    """
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
 
 
 def _col_letter(idx: int) -> str:
