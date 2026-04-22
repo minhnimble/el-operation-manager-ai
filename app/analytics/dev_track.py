@@ -249,9 +249,11 @@ def match_tab_to_member(tab_title: str, member_display_name: str) -> bool:
     mem_norm = _normalize(member_display_name)
     if not tab_norm or not mem_norm:
         return False
-    if tab_norm in mem_norm or mem_norm in tab_norm:
+    # Exact normalized equality first ("Don Vo" tab vs "Don Vo" member).
+    if tab_norm == mem_norm:
         return True
-    # Token-level match: "don" vs "vo minh don"
+    # Token-level match: "don" vs "vo minh don".
+    # Substring match was removed — it caused "Gia" → "Giang (Hiring)" false hits.
     tab_tokens = {_normalize(t) for t in re.split(r"\s+", tab_title) if t}
     mem_tokens = {_normalize(t) for t in re.split(r"\s+", member_display_name) if t}
     tab_tokens.discard("")
