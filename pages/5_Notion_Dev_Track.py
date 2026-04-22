@@ -32,7 +32,9 @@ from app.streamlit_env import load_streamlit_secrets_into_env
 
 load_streamlit_secrets_into_env()
 
-from app.analytics.dev_track import STATUS_LABELS
+from sqlalchemy import select
+
+from app.analytics.dev_track import STATUS_LABELS, match_tab_to_member
 from app.analytics.notion_sync import (
     MemberSyncPlan,
     MemberSyncResult,
@@ -41,6 +43,8 @@ from app.analytics.notion_sync import (
     collect_sync_plan,
 )
 from app.config import get_settings
+from app.database import AsyncSessionLocal
+from app.models.team_member import TeamMember
 from app.ui.page_utils import inject_page_load_bar
 from app.ui.session_cookie import restore_session_from_cookie
 
@@ -93,6 +97,63 @@ if not all(ok for _, ok, required in _config_rows if required):
         "Sync** for setup instructions. The service account also needs "
         "**Editor** access on the sheet (Viewer isn't enough for writes)."
     )
+    st.stop()
+
+
+# ── Member selector (reports only — exclude self) ────────────────────────────
+
+
+slack_user_id = st.session_state.get("slack_user_id")
+slack_team_id = st.session_state.get("slack_team_id")
+
+if not slack_user_id:
+    st.warning("Please connect your Slack account first on **Connect Accounts**.")
+    st.page_link("pages/1_Connect.py", label="Go to Connect Accounts")
+    st.stop()
+
+
+async def _load_reports(manager_user_id: str, manager_team_id: str) -> list[str]:
+    """Display names of the manager's direct reports (no self)."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(TeamMember).where(
+                TeamMember.manager_slack_user_id == manager_user_id,
+                TeamMember.manager_slack_team_id == manager_team_id,
+            ).order_by(TeamMember.member_display_name)
+        )
+        return [m.display() for m in result.scalars().all()]
+
+
+_reports = _run_async(_load_reports(slack_user_id, slack_team_id))
+
+if not _reports:
+    st.warning("No team members found. Add reports on **Team Overview** first.")
+    st.stop()
+
+if "notion_member_select" not in st.session_state:
+    st.session_state["notion_member_select"] = _reports
+
+_sel_col1, _sel_col2, _sel_col3 = st.columns([5, 1, 1])
+with _sel_col2:
+    if st.button("All", use_container_width=True, key="_notion_all"):
+        st.session_state["notion_member_select"] = _reports
+        st.rerun()
+with _sel_col3:
+    if st.button("Clear", use_container_width=True, key="_notion_clear"):
+        st.session_state["notion_member_select"] = []
+        st.rerun()
+with _sel_col1:
+    selected_members: list[str] = st.multiselect(
+        "Sync for",
+        options=_reports,
+        key="notion_member_select",
+        help="Pick which reports to sync. Notion entries are matched to the "
+             "selected members the same way Slack maps to Google Sheet tabs "
+             "(fuzzy name match).",
+    )
+
+if not selected_members:
+    st.info("Select at least one report above to sync.")
     st.stop()
 
 
@@ -169,6 +230,29 @@ plans: list[MemberSyncPlan] | None = st.session_state.get(_FETCH_KEY)
 if not plans:
     st.info("Click **Fetch from Notion** to preview what would be synced.")
     st.stop()
+
+# Filter plans → keep only Notion entries that match a selected member.
+# Uses `match_tab_to_member` (same fuzzy matcher as Slack→sheet-tab mapping)
+# so a Notion page like "Don <> Mike" matches the member "Don Pham".
+def _plan_matches_any(plan: MemberSyncPlan, names: list[str]) -> bool:
+    candidate = plan.dev_name or plan.notion_page_title or ""
+    return any(match_tab_to_member(candidate, n) for n in names)
+
+_unfiltered_count = len(plans)
+plans = [p for p in plans if _plan_matches_any(p, selected_members)]
+
+if not plans:
+    st.warning(
+        f"None of the {_unfiltered_count} Notion entries matched the selected "
+        f"member(s): {', '.join(selected_members)}. "
+        "Check that the Notion page titles include the member's name."
+    )
+    st.stop()
+else:
+    st.caption(
+        f"Showing {len(plans)} of {_unfiltered_count} Notion entries "
+        f"matching {len(selected_members)} selected member(s)."
+    )
 
 
 # ── Preview table ────────────────────────────────────────────────────────────
