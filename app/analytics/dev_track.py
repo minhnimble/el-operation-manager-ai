@@ -245,6 +245,13 @@ def match_tab_to_member(tab_title: str, member_display_name: str) -> bool:
     form as a substring check against both the full names AND each token,
     which keeps single-word tab names like "Don" matching a multi-word
     display name without requiring an exact match.
+
+    Tokenization splits on *any* non-alphanumeric run — whitespace, dots,
+    dashes, parentheses, em-dashes, etc. — so tab titles that compress the
+    first name into an initial (``"P.Nam"``, ``"V. Tung"``, ``"H-Giang"``)
+    still match the plain dev name (``"Nam"``, ``"Tung"``, ``"Giang"``).
+    Splitting on whitespace only produced a silent miss: ``"P.Nam"`` stayed
+    one token and ``"nam"`` never lined up with ``"pnam"``.
     """
     tab_norm = _normalize(tab_title)
     mem_norm = _normalize(member_display_name)
@@ -255,12 +262,11 @@ def match_tab_to_member(tab_title: str, member_display_name: str) -> bool:
         return True
     # Token-level match: "don" vs "vo minh don".
     # Substring match was removed — it caused "Gia" → "Giang (Hiring)" false hits.
-    tab_tokens = {_normalize(t) for t in re.split(r"\s+", tab_title) if t}
-    mem_tokens = {_normalize(t) for t in re.split(r"\s+", member_display_name) if t}
-    tab_tokens.discard("")
-    mem_tokens.discard("")
+    tab_tokens = {t for t in re.split(r"[^a-z0-9]+", tab_title.lower()) if t}
+    mem_tokens = {t for t in re.split(r"[^a-z0-9]+", member_display_name.lower()) if t}
     # A token is a useful match only if it's reasonably unique — two-letter
-    # tokens cause false positives (e.g., "Vo" matching "Volume").
+    # tokens cause false positives (e.g., "Vo" matching "Volume", or a
+    # leading initial "P" in "P.Nam" matching any other "P…" tab).
     return any(len(t) >= 3 and t in mem_tokens for t in tab_tokens) or \
            any(len(t) >= 3 and t in tab_tokens for t in mem_tokens)
 
