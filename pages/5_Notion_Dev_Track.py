@@ -327,7 +327,7 @@ if _dev_options:
                     "Skill":  upd.value,
                     "Status": STATUS_LABELS.get(upd.status, upd.status),
                     "Change": upd.reason,
-                    "Note":   (upd.note or "").replace("\n", " │ "),
+                    "Note":   (upd.note or "").replace("\n\n", " ⏎ ").replace("\n", " │ "),
                 })
             st.dataframe(diff_rows, use_container_width=True, hide_index=True)
 

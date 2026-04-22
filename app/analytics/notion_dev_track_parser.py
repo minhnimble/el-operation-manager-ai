@@ -157,14 +157,18 @@ def _format_note(todos: list[NotionBlock]) -> str | None:
     Returns ``None`` when there's nothing to render so callers can skip writing
     an empty cell note.
     """
-    lines: list[str] = []
+    groups: list[list[str]] = []
     for td in todos:
         text = td.text.strip()
         if not text:
             continue
-        lines.append(f"- {text}")
-        _append_nested(td.children, lines)
-    return "\n".join(lines) if lines else None
+        group: list[str] = [f"- {text}"]
+        _append_nested(td.children, group)
+        groups.append(group)
+    if not groups:
+        return None
+    # One blank line between items; sub-items stay directly under their parent.
+    return "\n\n".join("\n".join(g) for g in groups)
 
 
 def _append_nested(blocks: list[NotionBlock], lines: list[str]) -> None:
