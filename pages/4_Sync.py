@@ -29,8 +29,8 @@ from app.database import AsyncSessionLocal
 from app.models.team_member import TeamMember
 from app.models.user import User, UserGitHubLink
 from app.models.slack_token import SlackUserToken
-from app.models.raw_data import SlackMessage
-from app.models.work_unit import WorkUnit
+from app.models.raw_data import SlackMessage, GitHubActivity
+from app.models.work_unit import WorkUnit, WorkUnitSource
 from app.ingestion.slack_ingester import SlackIngester
 from app.ingestion.github_ingester import GitHubIngester
 from app.normalization.normalizer import normalize_slack_messages, normalize_github_activities
@@ -421,6 +421,93 @@ async def _delete_stale_slack_data(
         )
         await db.commit()
     return msg_result.rowcount, wu_result.rowcount
+
+
+# ── GitHub stale-data cleanup (per member) ────────────────────────────────────
+
+async def _current_github_login(
+    target_user_id: str, team_id: str,
+) -> str | None:
+    """Resolve the currently mapped github_login for a member.
+
+    Checks UserGitHubLink first (OAuth/PAT mapping), then TeamMember.github_login
+    (manager-set handle). Returns None if no mapping exists.
+    """
+    async with AsyncSessionLocal() as db:
+        login = await db.scalar(
+            select(UserGitHubLink.github_login).where(
+                UserGitHubLink.slack_user_id == target_user_id,
+                UserGitHubLink.slack_team_id == team_id,
+            )
+        )
+        if login:
+            return login
+        return await db.scalar(
+            select(TeamMember.github_login).where(
+                TeamMember.member_slack_user_id == target_user_id,
+                TeamMember.manager_slack_team_id == team_id,
+                TeamMember.github_login.isnot(None),
+                TeamMember.github_login != "",
+            )
+        )
+
+
+async def _count_stale_github_data(
+    target_user_id: str, team_id: str, current_login: str | None,
+) -> tuple[int, int]:
+    """Return (github_activity_count, github_work_unit_count) considered stale.
+
+    Stale rule:
+      - If member has no current github_login mapping → ALL rows are stale.
+      - Otherwise → rows whose stored github_login differs from current mapping
+        (handle rename / re-mapping).
+    """
+    async with AsyncSessionLocal() as db:
+        act_q = select(func.count()).select_from(GitHubActivity).where(
+            GitHubActivity.slack_user_id == target_user_id,
+            GitHubActivity.slack_team_id == team_id,
+        )
+        wu_q = select(func.count()).select_from(WorkUnit).where(
+            WorkUnit.slack_user_id == target_user_id,
+            WorkUnit.slack_team_id == team_id,
+            WorkUnit.source == WorkUnitSource.GITHUB,
+        )
+        if current_login:
+            act_q = act_q.where(GitHubActivity.github_login != current_login)
+            wu_q = wu_q.where(
+                (WorkUnit.github_login.is_(None))
+                | (WorkUnit.github_login != current_login)
+            )
+        act_c = await db.scalar(act_q)
+        wu_c = await db.scalar(wu_q)
+    return act_c or 0, wu_c or 0
+
+
+async def _delete_stale_github_data(
+    target_user_id: str, team_id: str, current_login: str | None,
+) -> tuple[int, int]:
+    """Delete stale GitHubActivity + github-source WorkUnit rows for the member."""
+    async with AsyncSessionLocal() as db:
+        wu_q = delete(WorkUnit).where(
+            WorkUnit.slack_user_id == target_user_id,
+            WorkUnit.slack_team_id == team_id,
+            WorkUnit.source == WorkUnitSource.GITHUB,
+        )
+        act_q = delete(GitHubActivity).where(
+            GitHubActivity.slack_user_id == target_user_id,
+            GitHubActivity.slack_team_id == team_id,
+        )
+        if current_login:
+            wu_q = wu_q.where(
+                (WorkUnit.github_login.is_(None))
+                | (WorkUnit.github_login != current_login)
+            )
+            act_q = act_q.where(GitHubActivity.github_login != current_login)
+
+        wu_result = await db.execute(wu_q)
+        act_result = await db.execute(act_q)
+        await db.commit()
+    return act_result.rowcount, wu_result.rowcount
 
 
 # ── DB-level ignored-channel cleanup (no Slack API required) ──────────────────
@@ -1592,9 +1679,12 @@ with _tab_ignored:
 # ── Tab 2: per-member stale membership cleanup (uses Slack API) ───────────────
 with _tab_member:
     st.caption(
-        "Removes messages synced for a specific member that belong to channels "
-        "they are no longer (or never were) a member of. "
-        "Uses the Slack API to determine current membership."
+        "Removes stale Slack **and** GitHub data for a specific member. "
+        "Slack: messages/work-units in channels they're no longer a member of "
+        "(verified via Slack API). "
+        "GitHub: activities/work-units whose stored `github_login` no longer "
+        "matches their current mapping — or all GitHub rows if the member has "
+        "no GitHub handle mapped."
     )
 
     _member_names_clean = list(team_options.keys())
@@ -1613,20 +1703,28 @@ with _tab_member:
         st.session_state.pop(_ck_confirm, None)
         try:
             access_token_cleanup = run(_get_slack_token(slack_user_id, slack_team_id))
-            with st.spinner("Checking Slack membership…"):
+            with st.spinner("Checking Slack membership + GitHub mapping…"):
                 valid_ids, valid_names = run(
                     _get_valid_channel_ids(access_token_cleanup, slack_team_id, _clean_user_id)
                 )
                 msg_c, wu_c = run(
                     _count_stale_slack_data(_clean_user_id, slack_team_id, valid_ids)
                 )
+                current_login = run(
+                    _current_github_login(_clean_user_id, slack_team_id)
+                )
+                gh_act_c, gh_wu_c = run(
+                    _count_stale_github_data(_clean_user_id, slack_team_id, current_login)
+                )
             st.session_state[_ck_valid]   = valid_ids
-            st.session_state[_ck_preview] = (msg_c, wu_c, valid_names)
+            st.session_state[_ck_preview] = (
+                msg_c, wu_c, valid_names, gh_act_c, gh_wu_c, current_login,
+            )
         except Exception as e:
-            st.error(f"Could not load channels: {e}")
+            st.error(f"Could not load membership/mapping: {e}")
 
     if _ck_preview in st.session_state:
-        msg_c, wu_c, valid_names = st.session_state[_ck_preview]
+        msg_c, wu_c, valid_names, gh_act_c, gh_wu_c, current_login = st.session_state[_ck_preview]
         valid_ids = st.session_state.get(_ck_valid, [])
 
         ch_list  = ", ".join(f"#{n}" for n in valid_names[:10])
@@ -1635,17 +1733,33 @@ with _tab_member:
             f"**{_clean_selected}** is currently in **{len(valid_names)}** channel(s): "
             f"{ch_list}{overflow}"
         )
+        if current_login:
+            st.info(f"Current GitHub mapping: **@{current_login}** "
+                    "— rows with any other stored login are considered stale.")
+        else:
+            st.info("No GitHub mapping found — **all** stored GitHub rows "
+                    "for this member are considered stale.")
 
-        if msg_c == 0 and wu_c == 0:
+        nothing_slack = (msg_c == 0 and wu_c == 0)
+        nothing_gh    = (gh_act_c == 0 and gh_wu_c == 0)
+
+        if nothing_slack and nothing_gh:
             st.success("✅ No stale data found — everything looks clean.")
         else:
-            st.warning(
-                f"Found **{msg_c}** message(s) and **{wu_c}** work unit(s) "
-                "outside those channels."
-            )
+            if not nothing_slack:
+                st.warning(
+                    f"**Slack:** {msg_c} message(s) + {wu_c} work unit(s) "
+                    "outside valid channels."
+                )
+            if not nothing_gh:
+                st.warning(
+                    f"**GitHub:** {gh_act_c} activity row(s) + {gh_wu_c} "
+                    "work unit(s) with stale/missing github_login."
+                )
             if not st.session_state.get(_ck_confirm):
                 if st.button(
-                    f"⚠️ Delete {msg_c} messages + {wu_c} work units",
+                    f"⚠️ Delete {msg_c + gh_act_c} raw row(s) + "
+                    f"{wu_c + gh_wu_c} work unit(s)",
                     type="primary",
                     key=f"confirm_cleanup_{_clean_user_id}",
                 ):
@@ -1656,9 +1770,12 @@ with _tab_member:
                     del_msgs, del_wus = run(
                         _delete_stale_slack_data(_clean_user_id, slack_team_id, valid_ids)
                     )
+                    del_gh_act, del_gh_wu = run(
+                        _delete_stale_github_data(_clean_user_id, slack_team_id, current_login)
+                    )
                     st.success(
-                        f"🗑️ Deleted **{del_msgs}** message(s) and "
-                        f"**{del_wus}** work unit(s) from stale channels."
+                        f"🗑️ Slack: **{del_msgs}** message(s) + **{del_wus}** work unit(s). "
+                        f"GitHub: **{del_gh_act}** activity row(s) + **{del_gh_wu}** work unit(s)."
                     )
                 except Exception as e:
                     st.error(f"Deletion failed: {e}")
