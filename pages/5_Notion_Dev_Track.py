@@ -134,7 +134,33 @@ async def _load_reports(manager_user_id: str, manager_team_id: str) -> list[str]
         return [m.display() for m in result.scalars().all()]
 
 
-_reports = _run_async(_load_reports(slack_user_id, slack_team_id))
+_REPORTS_CACHE_KEY = "_notion_reports_cache"
+
+
+def _load_reports_cached(manager_user_id: str, manager_team_id: str) -> list[str]:
+    """DB-lookup the team once per (user, team) and reuse across reruns.
+
+    Without this, every multiselect tick / button click re-hits the DB just
+    to redraw the "Sync for" widget. The only caller is this page; entries
+    are keyed on both ids so account-switches still refresh the list.
+    """
+    cache = st.session_state.get(_REPORTS_CACHE_KEY)
+    if (
+        cache
+        and cache["user_id"] == manager_user_id
+        and cache["team_id"] == manager_team_id
+    ):
+        return cache["reports"]
+    reports = _run_async(_load_reports(manager_user_id, manager_team_id))
+    st.session_state[_REPORTS_CACHE_KEY] = {
+        "user_id": manager_user_id,
+        "team_id": manager_team_id,
+        "reports": reports,
+    }
+    return reports
+
+
+_reports = _load_reports_cached(slack_user_id, slack_team_id)
 
 if not _reports:
     st.warning("No team members found. Add reports on **Team Overview** first.")
@@ -173,6 +199,11 @@ if not selected_members:
 _FETCH_KEY = "notion_sync_plans"
 _RESULTS_KEY = "notion_sync_results"
 _LAST_FETCH_KEY = "notion_sync_last_fetch"
+# Snapshot of the member multiselect taken at the moment of fetch. The
+# preview/diff below filters against this snapshot, not the live widget
+# value, so ticking members on/off doesn't redraw the preview until the
+# user explicitly clicks "Fetch from Notion" again.
+_SNAPSHOT_KEY = "notion_sync_members_snapshot"
 
 
 def _col_letter(idx: int) -> str:
@@ -187,8 +218,29 @@ def _col_letter(idx: int) -> str:
     return s
 
 
+def _skill_type_label(col_idx: int) -> str:
+    """Map the sheet column holding a skill to its dev-track category.
+
+    The dev-track sheet puts technical skills in column C (``col_idx=2``)
+    and soft skills in column D (``col_idx=3``). Any other column is an
+    unexpected layout; fall back to the literal column letter so the diff
+    still reads sensibly if the sheet is ever extended.
+    """
+    if col_idx == 2:
+        return "Technical"
+    if col_idx == 3:
+        return "Soft"
+    return f"Col {_col_letter(col_idx)}"
+
+
 def _fetch_plans() -> None:
-    """Fetch Notion + sheet data, build sync plans, cache in session state."""
+    """Fetch Notion + sheet data, build sync plans, cache in session state.
+
+    Also snapshots the *current* member multiselect so the preview/diff
+    stays pinned to what the user asked for at fetch time. Toggling the
+    multiselect afterwards is a no-op on the preview until the next fetch.
+    """
+    snapshot = list(st.session_state.get("notion_member_select") or [])
     tabs, plans = _run_async(
         collect_sync_plan(
             spreadsheet_id=settings.dev_track_sheet_id,
@@ -199,6 +251,7 @@ def _fetch_plans() -> None:
     st.session_state[_FETCH_KEY] = plans
     st.session_state["notion_sync_all_tabs"] = tabs
     st.session_state[_LAST_FETCH_KEY] = datetime.now(timezone.utc)
+    st.session_state[_SNAPSHOT_KEY] = snapshot
     # New fetch invalidates old results.
     st.session_state.pop(_RESULTS_KEY, None)
 
@@ -227,27 +280,42 @@ if not plans:
     st.info("Click **Fetch from Notion** to preview what would be synced.")
     st.stop()
 
-# Filter plans → keep only Notion entries that match a selected member.
+# Filter plans → keep only Notion entries that match a member captured in
+# the snapshot taken when the user last clicked "Fetch from Notion". The
+# live multiselect value is deliberately ignored here so ticking a name on
+# or off doesn't redraw the preview/diff. A separate nudge below tells the
+# user to re-fetch when the live selection has drifted from the snapshot.
 # Uses `match_tab_to_member` (same fuzzy matcher as Slack→sheet-tab mapping)
 # so a Notion page like "Don <> Mike" matches the member "Don Pham".
 def _plan_matches_any(plan: MemberSyncPlan, names: list[str]) -> bool:
     candidate = plan.dev_name or plan.notion_page_title or ""
     return any(match_tab_to_member(candidate, n) for n in names)
 
+# Fall back to the live selection only if we somehow have plans without a
+# snapshot (shouldn't happen in normal flow — _fetch_plans always writes
+# both — but keeps the page defensive across session migrations).
+snapshot_members: list[str] = st.session_state.get(_SNAPSHOT_KEY) or selected_members
+
+if set(snapshot_members) != set(selected_members):
+    st.info(
+        "ℹ️ Member selection has changed since the last fetch — click "
+        "**🔄 Fetch from Notion** above to refresh the preview."
+    )
+
 _unfiltered_count = len(plans)
-plans = [p for p in plans if _plan_matches_any(p, selected_members)]
+plans = [p for p in plans if _plan_matches_any(p, snapshot_members)]
 
 if not plans:
     st.warning(
-        f"None of the {_unfiltered_count} Notion entries matched the selected "
-        f"member(s): {', '.join(selected_members)}. "
+        f"None of the {_unfiltered_count} Notion entries matched the "
+        f"member(s) captured at fetch time: {', '.join(snapshot_members) or '—'}. "
         "Check that the Notion page titles include the member's name."
     )
     st.stop()
 else:
     st.caption(
         f"Showing {len(plans)} of {_unfiltered_count} Notion entries "
-        f"matching {len(selected_members)} selected member(s)."
+        f"matching {len(snapshot_members)} member(s) from the last fetch."
     )
 
 
@@ -322,8 +390,8 @@ if _dev_options:
             diff_rows = []
             for upd in selected_plan.updates:
                 diff_rows.append({
-                    "Row":    upd.row_idx + 1,  # display 1-based for humans
-                    "Col":    _col_letter(upd.col_idx),
+                    "Level":  upd.level or "",
+                    "Type":   _skill_type_label(upd.col_idx),
                     "Skill":  upd.value,
                     "Status": STATUS_LABELS.get(upd.status, upd.status),
                     "Change": upd.reason,

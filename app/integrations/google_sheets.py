@@ -215,6 +215,9 @@ class CellUpdate:
     * ``note`` — the multi-line note with ``-``/``+`` prefixes; ``None`` clears.
     * ``reason`` — free-form debug tag useful for diff previews in the UI
       (``"added"`` | ``"value_changed"`` | ``"color_changed"`` | ``"note_changed"``).
+    * ``level`` — the dev-track level number this skill belongs to (the
+      integer in column A of the sheet). Carried on the update purely for
+      display in the diff UI; writes ignore it.
     """
 
     row_idx: int
@@ -223,6 +226,7 @@ class CellUpdate:
     status: str
     note: str | None
     reason: str = ""
+    level: int = 0
 
 
 def _normalize_skill_text(text: str) -> str:
@@ -382,6 +386,7 @@ def compute_cell_updates(
                         status=skill.status,
                         note=new_note,
                         reason=",".join(reasons),
+                        level=level.level,
                     ))
             else:
                 # Skill isn't in the sheet — find a free cell in the level.
@@ -399,6 +404,7 @@ def compute_cell_updates(
                     status=skill.status,
                     note=(skill.note or None),
                     reason="added",
+                    level=level.level,
                 ))
 
     return updates
