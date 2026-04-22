@@ -20,7 +20,6 @@ callers can invoke them unconditionally.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any
 
 from notion_client import AsyncClient
@@ -53,9 +52,14 @@ class NotionBlock:
 # ── Client ───────────────────────────────────────────────────────────────────
 
 
-@lru_cache(maxsize=1)
 def _client() -> AsyncClient:
-    """Cached Notion async client. One per process — token doesn't rotate."""
+    """Fresh Notion async client per call.
+
+    Not cached: Streamlit opens a new event loop per callback, and an httpx
+    AsyncClient (which notion_client wraps) binds its transport to the loop
+    that was current at construction. Reusing a cached client across loops
+    raises "Event loop is closed" on the second call.
+    """
     settings = get_settings()
     if not settings.notion_api_key:
         raise RuntimeError(
@@ -72,8 +76,8 @@ def _client() -> AsyncClient:
 _VIEW_API_VERSION = "2026-03-11"
 
 
-@lru_cache(maxsize=1)
 def _view_client() -> AsyncClient:
+    """Fresh view-API client per call — see ``_client`` for why not cached."""
     settings = get_settings()
     if not settings.notion_api_key:
         raise RuntimeError(
