@@ -69,15 +69,29 @@ def _starts_with_prefix(text: str, *prefixes: str) -> bool:
     return any(lowered.startswith(p) for p in prefixes)
 
 
+# Prefixes whose mere presence signals the objective is actively in flight —
+# no V-ing check needed. "To-review" belongs with "in-review": the work is
+# either waiting on or going through review, both of which are still focus
+# states, not completed/discarded ones.
+_ACTIVE_OBJECTIVE_PREFIXES: tuple[str, ...] = (
+    "in-progress objective:",
+    "in-review objective:",
+    "to-review objective:",
+)
+
+
 def _is_in_progress_text(text: str) -> bool:
     """True if the objective phrasing indicates active work.
 
     Triggers:
-    * Explicit "In-progress objective:" / "In-review objective:" prefix.
-    * After prefix stripping, the first word is a V-ing form (>3 chars,
-      ends in "ing").
+    * Explicit ``In-progress objective:`` / ``In-review objective:`` /
+      ``To-review objective:`` prefix — all three describe work that is
+      still in flight regardless of the sentence that follows (which may
+      be an imperative like "Establish …" rather than a V-ing form).
+    * Otherwise, after stripping any known objective prefix, the first
+      word is a V-ing form (>3 chars, ends in ``ing``).
     """
-    if _starts_with_prefix(text, "in-progress objective:", "in-review objective:"):
+    if _starts_with_prefix(text, *_ACTIVE_OBJECTIVE_PREFIXES):
         return True
     clean = _strip_objective_prefix(text).strip()
     if not clean:
