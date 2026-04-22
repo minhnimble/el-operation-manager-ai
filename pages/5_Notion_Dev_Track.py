@@ -389,8 +389,13 @@ if _dev_options:
         else:
             diff_rows = []
             for upd in selected_plan.updates:
+                # `level` was added to CellUpdate after initial release.
+                # Use getattr so sessions that still hold pre-upgrade
+                # plan objects in session state don't crash — they just
+                # render a blank level until the next Fetch from Notion.
+                level_num = getattr(upd, "level", 0) or ""
                 diff_rows.append({
-                    "Level":  upd.level or "",
+                    "Level":  level_num,
                     "Type":   _skill_type_label(upd.col_idx),
                     "Skill":  upd.value,
                     "Status": STATUS_LABELS.get(upd.status, upd.status),
