@@ -69,27 +69,36 @@ def _starts_with_prefix(text: str, *prefixes: str) -> bool:
     return any(lowered.startswith(p) for p in prefixes)
 
 
-# Prefixes whose mere presence signals the objective is actively in flight —
-# no V-ing check needed. "To-review" belongs with "in-review": the work is
-# either waiting on or going through review, both of which are still focus
-# states, not completed/discarded ones.
+# Prefixes whose mere presence signals the objective is actively in flight
+# (blue / "in_progress"). "In-review" stays here — under active review is
+# still day-to-day work. "To-review" intentionally does NOT live here; see
+# ``_FOCUS_OBJECTIVE_PREFIXES`` below.
 _ACTIVE_OBJECTIVE_PREFIXES: tuple[str, ...] = (
     "in-progress objective:",
     "in-review objective:",
+)
+
+# Prefixes that place the objective in a pending-focus state
+# (yellow / "focus"): committed to but not being pushed forward minute by
+# minute. ``To-review`` belongs here — the dev has parked it waiting for
+# someone to review — as does ``New objective:`` (staged, not started).
+_FOCUS_OBJECTIVE_PREFIXES: tuple[str, ...] = (
+    "new objective:",
     "to-review objective:",
 )
 
 
 def _is_in_progress_text(text: str) -> bool:
-    """True if the objective phrasing indicates active work.
+    """True if the objective phrasing indicates active, in-flight work.
 
     Triggers:
-    * Explicit ``In-progress objective:`` / ``In-review objective:`` /
-      ``To-review objective:`` prefix — all three describe work that is
-      still in flight regardless of the sentence that follows (which may
-      be an imperative like "Establish …" rather than a V-ing form).
+    * Explicit ``In-progress objective:`` / ``In-review objective:`` prefix
+      — active work regardless of what sentence follows.
     * Otherwise, after stripping any known objective prefix, the first
       word is a V-ing form (>3 chars, ends in ``ing``).
+
+    ``To-review objective:`` and ``New objective:`` are deliberately NOT
+    matched here; they map to ``focus`` via ``_is_focus_objective`` instead.
     """
     if _starts_with_prefix(text, *_ACTIVE_OBJECTIVE_PREFIXES):
         return True
@@ -102,8 +111,15 @@ def _is_in_progress_text(text: str) -> bool:
     return len(first_word) > 3 and first_word.lower().endswith("ing")
 
 
-def _is_new_objective(text: str) -> bool:
-    return _starts_with_prefix(text, "new objective:")
+def _is_focus_objective(text: str) -> bool:
+    """True iff the objective phrasing signals a pending-focus state.
+
+    Covers ``New objective:`` (committed but not started) and
+    ``To-review objective:`` (work parked waiting for someone else to
+    review). Both map to the yellow ``focus`` status on the sheet and keep
+    the skill in Notion's Focus Areas.
+    """
+    return _starts_with_prefix(text, *_FOCUS_OBJECTIVE_PREFIXES)
 
 
 def _has_focus_intent(todos: list[NotionBlock]) -> bool:
@@ -115,20 +131,17 @@ def _has_focus_intent(todos: list[NotionBlock]) -> bool:
     colour state cannot drag a skill into — or out of — Focus Areas behind
     the user's back.
 
-    Returns True iff any direct unchecked to-do under the skill is phrased as:
-
-    * an in-progress objective (V-ing first word, or an explicit
-      ``In-progress objective:`` / ``In-review objective:`` prefix), **or**
-    * a ``New objective:`` — a focus area the developer has committed to but
-      not yet started.
-
-    Checked to-dos, paragraph-only "TBD" skills, and past-form completed
-    objectives all yield False.
+    Returns True iff any direct unchecked to-do under the skill is phrased as
+    either an in-progress objective (V-ing first word, or explicit
+    ``In-progress:`` / ``In-review:`` prefix) or a pending-focus objective
+    (``New objective:`` / ``To-review objective:``). Checked to-dos,
+    paragraph-only "TBD" skills, and past-form completed objectives all
+    yield False.
     """
     for td in todos:
         if td.checked:
             continue
-        if _is_in_progress_text(td.text) or _is_new_objective(td.text):
+        if _is_in_progress_text(td.text) or _is_focus_objective(td.text):
             return True
     return False
 
@@ -159,11 +172,12 @@ def _derive_status_from_objectives(
         if _is_in_progress_text(td.text):
             return "in_progress"
 
-    # Rule 2: any unchecked "New objective:" (and no V-ing from rule 1).
+    # Rule 2: any unchecked pending-focus objective — "New objective:" or
+    # "To-review objective:" — and no in-progress phrasing from rule 1.
     for td in todos:
         if td.checked:
             continue
-        if _is_new_objective(td.text):
+        if _is_focus_objective(td.text):
             return "focus"
 
     # Rule 4: never demote completed/proposed — the sheet wins.
