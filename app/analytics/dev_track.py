@@ -118,16 +118,17 @@ def classify_color(rgb: tuple[float, float, float] | None) -> SkillStatus:
     delta = mx - mn
 
     # Near-white (low saturation, high value) → not touched.
-    if delta < 0.06 and mx > 0.92:
+    # Threshold tuned for the palest palette row ("light X 3"): light purple 3
+    # has delta≈0.09 and mx≈0.91, so we keep the grey cutoff well below that.
+    if delta < 0.04 and mx > 0.95:
         return "todo"
     # Near-black / very low value: treat as todo too (shouldn't happen in
     # practice but keeps the function total).
     if mx < 0.2:
         return "todo"
 
-    # If saturation is very low but it's not bright white, it's a grey fill —
-    # also treat as todo.
-    if delta < 0.08:
+    # Grey fill (low saturation, not bright white) — treat as todo.
+    if delta < 0.05:
         return "todo"
 
     # Compute hue in degrees [0, 360).
