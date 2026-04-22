@@ -19,6 +19,7 @@ callers can invoke them unconditionally.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -314,10 +315,31 @@ def _find_focus_areas_children(blocks: list[NotionBlock]) -> list[NotionBlock]:
     return out
 
 
-def _normalize_skill_text(text: str) -> str:
-    """Lowercase, collapse whitespace, strip punctuation for fuzzy comparison."""
-    import re
+# Trailing terminal punctuation to drop from Focus Areas bullets. The section
+# is written as short phrases, not full sentences, so we never carry a
+# sentence-ending ``.`` / ``!`` / ``?`` / ``…`` into a bullet — even if the
+# source (Google Sheet skill cell) has one.
+_FOCUS_TERMINATOR_RE = re.compile(r"[.!?…]+\s*$")
+
+
+def normalize_skill_text(text: str) -> str:
+    """Lowercase, strip punctuation for fuzzy comparison.
+
+    Used both to detect duplicates when adding a Focus Areas bullet and by
+    ``notion_sync._compute_focus_area_diff`` to build the preview — same
+    rule on both sides so the diff view can never suggest an add that the
+    apply step would silently skip.
+    """
     return re.sub(r"[^a-z0-9\s]", "", (text or "").lower()).strip()
+
+
+def strip_focus_terminator(text: str) -> str:
+    """Drop trailing sentence-terminators + whitespace; keep internal punctuation."""
+    return _FOCUS_TERMINATOR_RE.sub("", (text or "").strip()).strip()
+
+
+# Back-compat alias — older internal callers used the underscore-prefixed name.
+_normalize_skill_text = normalize_skill_text
 
 
 async def _find_focus_areas_container(
@@ -357,10 +379,18 @@ async def add_skill_to_focus_areas(
     if not skill_text.strip():
         return False
 
+    # Focus Areas bullets use short-phrase formatting — no trailing period,
+    # even if the sheet's skill cell has one. Normalise before both the
+    # duplicate check and the write so the bullet we add matches the
+    # existing convention on the page.
+    clean_text = strip_focus_terminator(skill_text)
+    if not clean_text:
+        return False
+
     existing = _find_focus_areas_children(blocks)
-    target = _normalize_skill_text(skill_text)
+    target = normalize_skill_text(clean_text)
     for child in existing:
-        if _normalize_skill_text(child.text) == target:
+        if normalize_skill_text(child.text) == target:
             return False  # Already present — no-op.
 
     # Locate the heading; if missing, silently skip (don't invent a section).
@@ -381,7 +411,7 @@ async def add_skill_to_focus_areas(
             "type": "bulleted_list_item",
             "bulleted_list_item": {
                 "rich_text": [
-                    {"type": "text", "text": {"content": skill_text}}
+                    {"type": "text", "text": {"content": clean_text}}
                 ]
             },
         }],
@@ -403,13 +433,13 @@ async def remove_skill_from_focus_areas(
     if not skill_text.strip():
         return False
 
-    target = _normalize_skill_text(skill_text)
+    target = normalize_skill_text(skill_text)
     client = _client()
     deleted = False
     for child in _find_focus_areas_children(blocks):
         if child.type != "bulleted_list_item":
             continue
-        if _normalize_skill_text(child.text) == target:
+        if normalize_skill_text(child.text) == target:
             await client.blocks.delete(block_id=child.block_id)
             deleted = True
     return deleted

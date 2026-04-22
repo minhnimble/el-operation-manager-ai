@@ -9,7 +9,19 @@ Ties the three moving parts together:
    compute the minimal set of cell updates
    (``app/integrations/google_sheets.py``).
 3. **Apply** — batch-write the cell updates to the sheet AND update Notion's
-   ``## Focus Areas`` section so it stays in sync with the derived statuses.
+   ``## Focus Areas`` section so it reflects the developer's current focus.
+
+Two independent diffs come out of step 2, with deliberately different
+sources of truth:
+
+* **Cell updates** (Google Sheets) are driven by the full status derivation
+  in ``notion_dev_track_parser`` — sheet colour + Notion objectives, rules
+  1–5, so the sheet ends up showing the right colour / note / value.
+* **Focus Areas diff** (Notion) is driven **only** by Notion's Skills
+  Development objectives — see ``_compute_focus_area_diff``. The Google
+  Sheet is never read for this decision, which keeps the Focus Areas list
+  a faithful mirror of what the developer says they're working on in
+  Notion rather than an echo of the sheet's colour state.
 
 Call ``collect_sync_plan`` first to build a preview (no side effects), then
 ``apply_sync_plan`` to actually write. The Streamlit page uses the preview
@@ -117,27 +129,60 @@ def _compute_focus_area_diff(
 ) -> tuple[list[str], list[str]]:
     """Derive which skill names need to be added/removed from Focus Areas.
 
-    Rules (from the approved plan):
-    * ``in_progress`` or ``focus`` skills → should be in Focus Areas.
-    * ``todo`` skills that are currently *in* Focus Areas → remove them.
-      (They were presumably put there because they used to be blue/yellow,
-      but the derivation has now demoted them.)
-    * ``completed`` / ``proposed`` → leave Focus Areas untouched (don't add,
-      don't remove).
+    **Pure-Notion decision.** The Google Sheet is never consulted here. A
+    skill belongs in Focus Areas iff one of its unchecked to-dos in the
+    ``## Skills Development`` section matches the focus constraint
+    (V-ing / ``In-progress objective:`` / ``New objective:``) — see
+    ``notion_dev_track_parser._has_focus_intent``. The sheet's colour /
+    derived status is deliberately ignored so a green cell in the sheet
+    can't stop a genuinely-focused skill from appearing, and a blue cell
+    can't keep a demoted skill pinned.
+
+    Diff rules:
+
+    * Skill with focus intent + not already in Focus Areas → **add**.
+    * Skill **without** focus intent + already in Focus Areas → **remove**
+      (it was presumably added back when it had an active objective).
+    * A bullet in Focus Areas that doesn't correspond to any skill in
+      Skills Development is left alone — it was added by hand and isn't
+      ours to touch.
+
+    Comparison keys go through ``notion_api.normalize_skill_text`` so
+    trivial drift (trailing period, case, whitespace) can't produce a
+    phantom "to add" that the write step would silently skip. ``to_add``
+    strings are stripped of any trailing ``.!?…`` so new bullets follow
+    the Focus Areas convention of short phrases without sentence
+    terminators. ``to_remove`` echoes the exact Notion bullet text so the
+    diff view matches what the user sees on the page.
     """
-    active_skills: set[str] = set()
-    passive_skills: set[str] = set()
-    for level in track.levels:
-        for skill in level.skills:
-            if skill.status in ("in_progress", "focus"):
-                active_skills.add(skill.text.strip())
-            elif skill.status == "todo":
-                passive_skills.add(skill.text.strip())
+    active_by_key: dict[str, str] = {}
+    for raw in track.skills_with_focus_intent:
+        text = notion_api.strip_focus_terminator(raw)
+        key = notion_api.normalize_skill_text(text)
+        if key:
+            active_by_key[key] = text
 
-    current = {s.strip() for s in track.focus_skill_names}
+    # Notion-tracked skills that did *not* get focus intent. These are the
+    # only skills we're allowed to remove from Focus Areas; anything else in
+    # Focus Areas was put there by hand and stays untouched.
+    passive_keys: set[str] = set()
+    for raw in track.all_skill_texts:
+        key = notion_api.normalize_skill_text(notion_api.strip_focus_terminator(raw))
+        if key and key not in active_by_key:
+            passive_keys.add(key)
 
-    to_add = sorted(active_skills - current)
-    to_remove = sorted(passive_skills & current)
+    current_by_key: dict[str, str] = {}
+    for raw in track.focus_skill_names:
+        key = notion_api.normalize_skill_text(raw)
+        if key:
+            current_by_key[key] = (raw or "").strip()
+
+    to_add = sorted(
+        text for key, text in active_by_key.items() if key not in current_by_key
+    )
+    to_remove = sorted(
+        current_by_key[key] for key in passive_keys if key in current_by_key
+    )
     return to_add, to_remove
 
 

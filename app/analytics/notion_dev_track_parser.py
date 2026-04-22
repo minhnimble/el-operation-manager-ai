@@ -92,6 +92,33 @@ def _is_new_objective(text: str) -> bool:
     return _starts_with_prefix(text, "new objective:")
 
 
+def _has_focus_intent(todos: list[NotionBlock]) -> bool:
+    """Pure-Notion signal for "this skill belongs in Focus Areas".
+
+    Mirrors Rules 1 + 2 of ``_derive_status_from_objectives`` but **without**
+    any Google Sheet context. The Focus Areas sync is defined off this helper
+    (see ``notion_sync._compute_focus_area_diff``) so the sheet's derived
+    colour state cannot drag a skill into — or out of — Focus Areas behind
+    the user's back.
+
+    Returns True iff any direct unchecked to-do under the skill is phrased as:
+
+    * an in-progress objective (V-ing first word, or an explicit
+      ``In-progress objective:`` / ``In-review objective:`` prefix), **or**
+    * a ``New objective:`` — a focus area the developer has committed to but
+      not yet started.
+
+    Checked to-dos, paragraph-only "TBD" skills, and past-form completed
+    objectives all yield False.
+    """
+    for td in todos:
+        if td.checked:
+            continue
+        if _is_in_progress_text(td.text) or _is_new_objective(td.text):
+            return True
+    return False
+
+
 # ── Status derivation ────────────────────────────────────────────────────────
 
 
@@ -197,6 +224,13 @@ class NotionDevTrack:
 
     Shape matches ``app.analytics.dev_track.DevTrack`` closely so downstream
     display code can render either origin uniformly.
+
+    ``skills_with_focus_intent`` and ``all_skill_texts`` are the pure-Notion
+    inputs to the Focus Areas sync — computed directly from Skills
+    Development objectives without consulting the Google Sheet. Keeping them
+    on the track (rather than re-deriving in the sync layer) means the sheet
+    can never quietly influence which Focus Areas bullets get added or
+    removed.
     """
 
     dev_name: str
@@ -204,6 +238,8 @@ class NotionDevTrack:
     page_title: str
     levels: list[TrackLevel] = field(default_factory=list)
     focus_skill_names: set[str] = field(default_factory=set)
+    skills_with_focus_intent: set[str] = field(default_factory=set)
+    all_skill_texts: set[str] = field(default_factory=set)
 
 
 def _normalize_key(text: str) -> str:
@@ -350,6 +386,10 @@ def parse_dev_track_page(
     sheet_status = _build_sheet_status_lookup(current_sheet_tab)
 
     levels: list[TrackLevel] = []
+    # Pure-Notion focus signal — computed alongside the entangled sheet-aware
+    # status so the sync layer can pick either view without re-walking blocks.
+    skills_with_focus_intent: set[str] = set()
+    all_skill_texts: set[str] = set()
     for level_num, level_title, section in _iter_level_sections(blocks):
         level = TrackLevel(level=level_num, title=level_title)
         for sb in _skill_blocks(section):
@@ -361,6 +401,9 @@ def parse_dev_track_page(
             level.skills.append(
                 Skill(text=skill_text, status=status, note=note)
             )
+            all_skill_texts.add(skill_text)
+            if _has_focus_intent(todos):
+                skills_with_focus_intent.add(skill_text)
         levels.append(level)
 
     return NotionDevTrack(
@@ -369,4 +412,6 @@ def parse_dev_track_page(
         page_title=page_title,
         levels=levels,
         focus_skill_names=focus_names,
+        skills_with_focus_intent=skills_with_focus_intent,
+        all_skill_texts=all_skill_texts,
     )
