@@ -63,6 +63,38 @@ class GitHubIngester:
     async def get_repos(self) -> list[dict]:
         return await self._paginate("/user/repos", {"type": "all", "sort": "pushed"})
 
+    async def get_contribution_repo_names(
+        self, since: datetime, until: datetime | None = None,
+    ) -> set[str]:
+        """Return full_names of repos where `self.github_login` has any PR/issue
+        activity (authored, assigned, mentioned, commented, reviewed) in
+        [since, until]. Uses Search API — cross-org, no per-repo loop.
+
+        Does NOT cover commits-only contributions (commit search is heavily
+        rate-limited); callers should union with a commits-based probe if needed.
+        """
+        s = since.date().isoformat()
+        u = (until or datetime.utcnow()).date().isoformat()
+        rng = f"{s}..{u}"
+        repos: set[str] = set()
+        # `involves:` matches author, assignee, mentions, commenter. Plus
+        # reviewed-by explicitly for PRs the user only reviewed.
+        queries = [
+            f"involves:{self.github_login} updated:{rng}",
+            f"reviewed-by:{self.github_login} updated:{rng}",
+        ]
+        for q in queries:
+            try:
+                items = await self._search_issues(q)
+            except Exception as e:
+                logger.warning("Search repos failed (%s): %s", q, e)
+                continue
+            for it in items:
+                name = self._repo_full_name_from_url(it.get("repository_url", ""))
+                if name:
+                    repos.add(name)
+        return repos
+
     async def get_commits(
         self, repo_full_name: str, since: datetime | None = None
     ) -> list[dict]:

@@ -584,6 +584,17 @@ async def _get_github_repos(access_token: str, github_login: str) -> list[dict]:
         await ingester.close()
 
 
+async def _get_contribution_repo_names(
+    access_token: str, github_login: str,
+    since: datetime, until: datetime | None = None,
+) -> set[str]:
+    ingester = GitHubIngester(access_token=access_token, github_login=github_login)
+    try:
+        return await ingester.get_contribution_repo_names(since=since, until=until)
+    finally:
+        await ingester.close()
+
+
 async def _sync_github_repo(
     access_token: str,
     github_login: str,
@@ -982,6 +993,33 @@ def _run_github_sync_bg(
                 repos = _run(_get_github_repos(gh_token, github_login))
                 _jlog(job, f"  Found {len(repos)} repo(s).")
 
+                # Pre-filter: only repos with actual contributions in [since, until].
+                # Uses Search API (`involves:` + `reviewed-by:`) — one call per query,
+                # cross-org. Skips per-repo probing against inactive repos.
+                try:
+                    _jlog(job, "  🔎 Filtering to repos with contributions…")
+                    contrib_names = _run(_get_contribution_repo_names(
+                        gh_token, github_login, since, until,
+                    ))
+                    if contrib_names:
+                        before = len(repos)
+                        repos = [r for r in repos if r["full_name"] in contrib_names]
+                        # Include contribution repos that weren't in /user/repos
+                        # (e.g. contributed via fork / external org membership).
+                        known = {r["full_name"] for r in repos}
+                        for name in contrib_names - known:
+                            repos.append({"full_name": name})
+                        _jlog(
+                            job,
+                            f"  ↳ {len(repos)} repo(s) with contributions "
+                            f"(filtered from {before}).",
+                        )
+                    else:
+                        _jlog(job, "  ↳ No contributions found via Search — skipping repo loop.", "warn")
+                        repos = []
+                except Exception as e:
+                    _jlog(job, f"  ⚠️ Contribution filter failed ({e}); scanning all repos.", "warn")
+
                 tc: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
                 n_repos = max(len(repos), 1)
                 for r_idx, repo in enumerate(repos):
@@ -1066,8 +1104,8 @@ def _render_job_ui(job: dict, state_key: str) -> None:
         for i, ms in enumerate(statuses):
             cols[i % 5].caption(f"{ms['status']} **{ms['name']}**  \n{ms['detail']}")
 
-    # Scrollable log — use a text_area so it doesn't explode into hundreds of st.write rows
-    log_lines = [msg for _, msg in job["log"]]
+    # Scrollable log — newest at top so live updates don't push the view down.
+    log_lines = [msg for _, msg in job["log"]][::-1]
     st.text_area(
         "Log",
         value="\n".join(log_lines),
