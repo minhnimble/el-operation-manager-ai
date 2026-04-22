@@ -1104,16 +1104,22 @@ def _render_job_ui(job: dict, state_key: str) -> None:
         for i, ms in enumerate(statuses):
             cols[i % 5].caption(f"{ms['status']} **{ms['name']}**  \n{ms['detail']}")
 
-    # Scrollable log — newest at top so live updates don't push the view down.
-    log_lines = [msg for _, msg in job["log"]][::-1]
+    # Scrollable log — show tail window so the latest entry is always visible
+    # without the user having to scroll. Full history still available via expander.
+    all_lines = [msg for _, msg in job["log"]]
+    TAIL = 20
+    tail_lines = all_lines[-TAIL:]
     st.text_area(
         "Log",
-        value="\n".join(log_lines),
+        value="\n".join(tail_lines),
         height=280,
         disabled=True,
         label_visibility="collapsed",
-        key=f"_log_area_{state_key}_{len(log_lines)}",
+        key=f"_log_area_{state_key}_{len(all_lines)}",
     )
+    if len(all_lines) > TAIL:
+        with st.expander(f"Show full log ({len(all_lines)} lines)"):
+            st.text(("\n".join(all_lines)))
 
     if job["running"]:
         # Show Stop button while sync is in progress
