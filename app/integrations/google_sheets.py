@@ -189,18 +189,17 @@ def fetch_all_tabs(sheet_id: str) -> list[SheetTab]:
 # ``dev_track.classify_color`` decodes when reading. These are the RGB values
 # Sheets' swatch picker produces — slight drift (±0.05 per channel) is fine
 # because the reader classifies by hue, not exact RGB.
-# Google Sheets preset palette — the "light <hue> 3" swatches (row 3 of the
-# default color picker). Hex values are exactly what Sheets assigns when
-# picking those presets, so cells match the native UI swatches.
-#   light green 3  #b6d7a8
-#   light blue 3   #9fc5e8
-#   light purple 3 #b4a7d6
-#   light yellow 3 #ffe599
+# Google Sheets preset palette — "light <hue> 3" swatches. Hex values are what
+# Sheets assigns when picking those presets, so cells match the native UI.
+#   light green 3            #93c47d
+#   light cornflower blue 3  #6d9eeb
+#   light purple 3           #8e7cc3
+#   light yellow 3           #ffd966
 STATUS_COLORS: dict[str, tuple[float, float, float] | None] = {
-    "completed":   (0xB6 / 255, 0xD7 / 255, 0xA8 / 255),  # light green 3
-    "in_progress": (0x9F / 255, 0xC5 / 255, 0xE8 / 255),  # light blue 3
-    "proposed":    (0xB4 / 255, 0xA7 / 255, 0xD6 / 255),  # light purple 3
-    "focus":       (0xFF / 255, 0xE5 / 255, 0x99 / 255),  # light yellow 3
+    "completed":   (0x93 / 255, 0xC4 / 255, 0x7D / 255),  # light green 3
+    "in_progress": (0x6D / 255, 0x9E / 255, 0xEB / 255),  # light cornflower blue 3
+    "proposed":    (0x8E / 255, 0x7C / 255, 0xC3 / 255),  # light purple 3
+    "focus":       (0xFF / 255, 0xD9 / 255, 0x66 / 255),  # light yellow 3
     "todo":        None,                                   # no fill (white)
 }
 
