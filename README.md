@@ -7,7 +7,7 @@ Turns Slack + GitHub activity into structured work analytics for Engineering Man
 ## What It Does
 
 - **Slack activity** — pulls messages from public and private channels you're in, including standup bots (Geekbot-style)
-- **GitHub activity** — commits, PRs, reviews, and issues via user OAuth
+- **GitHub activity** — PRs (created + reviewed) cross-org via Search API + PAT, with optional per-repo deep mode for commits/issues
 - **Team management** — add engineers to your roster; they don't need to sign in
 - **Batch sync** — sync yourself, your whole team, or any subset at once with per-member progress
 - **Background sync** — runs in a daemon thread; switch pages freely without losing progress
@@ -26,7 +26,7 @@ Turns Slack + GitHub activity into structured work analytics for Engineering Man
 | UI | Streamlit |
 | Database | PostgreSQL (SQLAlchemy async + NullPool) |
 | Slack | Sign in with Slack — user OAuth (no bot, no webhooks) |
-| GitHub | GitHub REST API v3 — user OAuth |
+| GitHub | GitHub REST + Search API — Personal Access Token (PAT) |
 | AI | Anthropic Claude API |
 | Notion | Notion API v1 — Internal Integration token |
 | Migrations | Alembic |
@@ -40,7 +40,7 @@ Turns Slack + GitHub activity into structured work analytics for Engineering Man
 - Python 3.13+
 - A PostgreSQL database (Supabase recommended for cloud, Docker for local)
 - A Slack OAuth app
-- A GitHub OAuth app
+- A GitHub Personal Access Token (PAT) with `repo` + `read:org` scopes
 - An Anthropic API key
 - A Google Cloud service account with Sheets API access — for Developer Track
 - A Notion Internal Integration token — for Notion Dev Track Sync
@@ -51,11 +51,11 @@ Turns Slack + GitHub activity into structured work analytics for Engineering Man
 
 > **Why cloud first?** Slack OAuth requires `https://` redirect URLs — even for `localhost`. Streamlit Cloud gives you HTTPS out of the box with zero cert setup.
 
-### 1. Create OAuth apps
+### 1. Set up Slack
 
-**Slack** — go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From Scratch.
+**a. Create the OAuth app** — [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From Scratch.
 
-Under **OAuth & Permissions → User Token Scopes**, add:
+**b. Add User Token Scopes** under **OAuth & Permissions → User Token Scopes**:
 
 ```
 channels:history       — read public channel messages
@@ -69,20 +69,27 @@ usergroups:read        — resolve @subteam mentions to group handles
 
 > These must be **User Token Scopes**, not Bot Token Scopes.
 
-**GitHub** — go to [github.com/settings/developers](https://github.com/settings/developers) → OAuth Apps → New OAuth App.
+**c. Set the redirect URL** — **OAuth & Permissions → Redirect URLs** → add `https://yourapp.streamlit.app` (root URL, no `/callback` path).
 
-Set both **Homepage URL** and **Authorization callback URL** to your Streamlit Cloud URL (e.g. `https://yourapp.streamlit.app`).
+**d. Copy credentials** — copy the **Client ID** and **Client Secret** from **Basic Information**. You'll paste them into the secrets step below.
 
-### 2. Set redirect URLs
+### 2. Set up GitHub
 
-Both Slack and GitHub OAuth redirect to the app root URL via query params — no `/callback` path.
+**a. Create a Personal Access Token** — [github.com/settings/tokens](https://github.com/settings/tokens/new?description=Engineering+Operations+Manager&scopes=repo,read:org) → **Generate new token (classic)**.
 
-| Provider | Where to set | Value |
+| Scope | Why |
+|---|---|
+| `repo` | Read PRs, reviews, commits in private + public repos |
+| `read:org` | Cross-org Search API visibility (needed for Overview-mode sync) |
+
+**b. Copy the token** (`ghp_…` or `github_pat_…`). Two ways to provide it:
+
+| Method | Where | When to use |
 |---|---|---|
-| Slack | OAuth & Permissions → Redirect URLs | `https://yourapp.streamlit.app` |
-| GitHub | Authorization callback URL | `https://yourapp.streamlit.app` |
+| **Env var / Streamlit secret** *(recommended)* | `GITHUB_PAT=ghp_...` in `.env` or Streamlit secrets | Single-tenant deploy. Never touches the DB. Rotate by updating the secret + reboot. |
+| **Per-user PAT in DB** | Paste on **Connect Accounts** page after deploy | Multi-tenant or per-user override. Stored in `user_github_links.github_access_token`. |
 
-Copy the **Client ID** and **Client Secret** from each provider — you'll need them in step 4.
+Resolution order at sync time: env var → per-user DB PAT → fail. One PAT covers the whole team.
 
 ### 3. Deploy to Streamlit Cloud
 
@@ -122,8 +129,10 @@ DATABASE_URL = "postgresql+asyncpg://postgres.xxxx:[password]@aws-0-us-east-1.po
 SLACK_CLIENT_ID     = "..."
 SLACK_CLIENT_SECRET = "..."
 
-GITHUB_CLIENT_ID     = "..."
-GITHUB_CLIENT_SECRET = "..."
+# GitHub PAT — recommended path. Single token for the whole team.
+# Required scopes: repo + read:org. Leave blank to fall back to per-user
+# PATs pasted on the Connect Accounts page.
+GITHUB_PAT = "ghp_..."
 
 ANTHROPIC_API_KEY = "sk-ant-..."
 ANTHROPIC_MODEL   = "claude-sonnet-4-6"
@@ -157,23 +166,45 @@ Click **Reboot app** after saving.
 
 ### 1. Connect Accounts
 
-Go to **🔗 Connect Accounts** → **Sign in with Slack**. Then click **Connect GitHub**.
+Go to **🔗 Connect Accounts** → **Sign in with Slack**.
 
-Use **Reconnect** at any time to refresh tokens or pick up new OAuth scopes.
+For GitHub: paste your **Personal Access Token (PAT)** in the GitHub section and click **Connect GitHub**. The app validates the PAT against `/user`, stores it in the DB, and uses it for all subsequent GitHub queries. Use **Update / rotate PAT** to swap in a new token.
+
+> One PAT covers the whole team. The token must have `repo` + `read:org` scopes for cross-org Search API access.
 
 ### 2. Build Your Team
 
 Go to **👥 Team Overview** → **Load workspace users** → select your direct reports → **Add selected members**.
 
-Optionally set each member's GitHub handle. If they later connect via OAuth, that takes precedence.
+Set each member's GitHub handle (`github_login`) so the manager's PAT can query their PRs/reviews via the Search API.
 
-> Team members do not need to sign in.
+> Team members do not need to sign in. They do not need their own PAT.
 
 ### 3. Sync Data
 
 Go to **🔄 Sync Data**, pick members (**All** / **My Team** / individual), set the date range, and click **Sync Slack** or **Sync GitHub**.
 
 The sync runs in the background — switch pages freely and come back to see progress.
+
+**GitHub sync — two modes:**
+
+| Mode | Toggle | What it pulls | When to use |
+|---|---|---|---|
+| **🔭 Overview mode** *(default)* | ON | PRs **created** + PRs **reviewed** by member, across **all organizations** the PAT can see | Default. Mirrors `github.com/<user>?tab=overview&from=YYYY-MM-DD&to=YYYY-MM-DD`. Cross-org. Fast. Single Search API query per member. |
+| **Per-repo mode** | OFF | Commits + PRs + reviews + issues, repo-by-repo (only repos the token lists) | When you need commits, or the member is in a small fixed set of repos and you want the full payload. Slower. |
+
+Overview mode uses the **GitHub Search API** with your **Personal Access Token (PAT)** to pull everything the member did in any org your PAT has visibility into — even repos you've never indexed. Skips commits (commit-search is heavily rate-limited on GitHub's side).
+
+**Token resolution** (per member, in order):
+1. **`GITHUB_PAT` env/secret** + member's `github_login` (recommended)
+2. **Manager's DB-stored PAT** (Connect page) + member's `github_login` (legacy)
+3. **Member's own DB-stored PAT** + login (fallback)
+4. Skip if none available
+
+Set the member's GitHub handle in **Team Overview**. Either set `GITHUB_PAT` in env/secrets (best), or paste a PAT in **Connect Accounts**. One PAT covers the whole team.
+
+**Date range** maps directly to the overview URL:
+`from=sync_start.date()` `to=sync_end.date()` (or "now" if open-ended).
 
 **Slack sync behaviour:**
 
@@ -191,6 +222,7 @@ The sync runs in the background — switch pages freely and come back to see pro
 
 Go to **📊 Work Report**, select a member, choose a date range, and click **Generate Report**.
 
+- **🔗 Pull Request Links** — three grouped expanders (PRs Created · PRs Merged · PRs Reviewed) with direct links, deduped per PR
 - **Activity Feed** — commits, PRs, reviews, standups, all browsable
 - **AI Insights** — Claude-powered work classification and leadership summary
 - **Developer Track** — level + skill progress from a Google Sheet (see below)
@@ -312,8 +344,9 @@ APP_BASE_URL=https://localhost:8501
 SLACK_CLIENT_ID=...
 SLACK_CLIENT_SECRET=...
 
-GITHUB_CLIENT_ID=...
-GITHUB_CLIENT_SECRET=...
+# GitHub PAT (recommended). Required scopes: repo + read:org.
+# Leave blank to fall back to per-user PATs pasted in the Connect page.
+GITHUB_PAT=ghp_...
 
 ANTHROPIC_API_KEY=sk-ant-...
 ```
@@ -347,7 +380,7 @@ streamlit run streamlit_app.py \
   --server.sslKeyFile .certs/localhost-key.pem
 ```
 
-Set the OAuth redirect URL for both Slack and GitHub to `https://localhost:8501`.
+Set the Slack OAuth redirect URL to `https://localhost:8501`. GitHub needs no redirect — paste your PAT in the Connect page.
 
 ---
 
@@ -356,7 +389,7 @@ Set the OAuth redirect URL for both Slack and GitHub to `https://localhost:8501`
 ```
 streamlit_app.py               # Main UI + OAuth callback handler
 pages/
-├── 1_Connect.py               # Slack + GitHub OAuth linking
+├── 1_Connect.py               # Slack OAuth + GitHub PAT linking
 ├── 2_Work_Report.py           # Work reports — charts, feed, share summary
 ├── 3_Team_Overview.py         # Team management — add/remove/edit members
 ├── 4_Sync.py                  # Slack + GitHub sync with background progress
@@ -371,7 +404,7 @@ app/
 ├── ai/                        # Claude-powered classification + insights
 ├── integrations/              # Google Sheets + Notion async clients
 ├── slack/                     # OAuth flow + workspace user listing
-└── github/                    # OAuth exchange + user linking
+└── github/                    # PAT validation + user linking (oauth.py)
 ```
 
 ---
@@ -390,6 +423,6 @@ ENABLE_ORG_ANALYTICS=false     # Not yet implemented
 
 - Only channels the EM has joined are synced
 - For team member syncs, only that member's messages are stored
-- GitHub access requires explicit OAuth consent per user
+- GitHub access uses a PAT you paste yourself; revoke it any time at github.com/settings/tokens
 - All data stays in your own database
 - Team members can be removed at any time

@@ -107,22 +107,25 @@ def trigger_github_sync(
 async def _async_github_sync(
     slack_user_id: str, slack_team_id: str, days_back: int
 ) -> None:
+    from app.config import get_settings
+    pat = (get_settings().github_pat or "").strip()
+    if not pat:
+        logger.warning("GITHUB_PAT not configured — skipping GitHub sync")
+        return
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(UserGitHubLink).where(
+            select(UserGitHubLink.github_login).where(
                 UserGitHubLink.slack_user_id == slack_user_id,
                 UserGitHubLink.slack_team_id == slack_team_id,
             )
         )
-        link = result.scalar_one_or_none()
-        if not link or not link.github_access_token:
-            logger.warning("No GitHub link for user %s", slack_user_id)
+        login = result.scalar_one_or_none()
+        if not login:
+            logger.warning("No GitHub login mapped for user %s", slack_user_id)
             return
 
-        ingester = GitHubIngester(
-            access_token=link.github_access_token,
-            github_login=link.github_login,
-        )
+        ingester = GitHubIngester(access_token=pat, github_login=login)
         try:
             since = datetime.utcnow() - timedelta(days=days_back)
             counts = await ingester.ingest_user_activity(
@@ -143,10 +146,11 @@ def sync_github_all_users():
 
 
 async def _async_sync_all_github() -> None:
+    """Fan-out: queue a sync for every user with a github_login mapping."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(UserGitHubLink).where(
-                UserGitHubLink.github_access_token.is_not(None)
+                UserGitHubLink.github_login.is_not(None)
             )
         )
         links = result.scalars().all()

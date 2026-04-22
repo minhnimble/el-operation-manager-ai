@@ -28,7 +28,7 @@ from app.config import get_settings
 from app.models.user import User
 from app.models.slack_token import SlackUserToken
 from app.slack.oauth import build_auth_url, exchange_code, save_slack_token
-from app.github.oauth import link_github_to_user
+from app.github.oauth import link_github_login
 from app.analytics.report_builder import build_work_report
 from app.tasks.ingestion_tasks import trigger_backfill, trigger_github_sync
 
@@ -73,42 +73,27 @@ async def slack_auth_callback(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# ─── GitHub OAuth ─────────────────────────────────────────────────────────────
+# ─── GitHub login mapping ─────────────────────────────────────────────────────
 
-@router.get("/auth/github")
-async def github_auth_start(
-    slack_user_id: str = Query(...),
-    slack_team_id: str = Query(...),
-):
-    """Redirect user to GitHub authorization page."""
-    state = f"{slack_team_id}:{slack_user_id}"
-    github_oauth_url = (
-        f"https://github.com/login/oauth/authorize"
-        f"?client_id={settings.github_client_id}"
-        f"&scope=read:user,repo"
-        f"&state={state}"
-        f"&redirect_uri={settings.app_base_url}/auth/github/callback"
-    )
-    return RedirectResponse(url=github_oauth_url)
-
-
-@router.get("/auth/github/callback")
-async def github_oauth_callback(
-    code: str = Query(...),
-    state: str = Query(...),
+@router.post("/auth/github/link")
+async def github_link(
+    payload: dict,
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        parts = state.split(":")
-        if len(parts) != 2:
-            raise ValueError("Invalid state parameter")
-        slack_team_id, slack_user_id = parts
+    """Map a Slack user to a GitHub login. No token stored.
 
-        link = await link_github_to_user(
+    Body: {"slack_user_id": "...", "slack_team_id": "...", "github_login": "octocat"}
+    """
+    try:
+        slack_user_id = payload["slack_user_id"]
+        slack_team_id = payload["slack_team_id"]
+        github_login = payload["github_login"]
+
+        link = await link_github_login(
             db=db,
             slack_user_id=slack_user_id,
             slack_team_id=slack_team_id,
-            code=code,
+            github_login=github_login,
         )
 
         trigger_github_sync.delay(
@@ -118,11 +103,13 @@ async def github_oauth_callback(
         )
 
         return JSONResponse({
-            "message": f"GitHub account @{link.github_login} linked successfully.",
+            "message": f"GitHub login @{link.github_login} mapped successfully.",
             "github_login": link.github_login,
         })
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail=f"Missing field: {e}")
     except Exception as e:
-        logger.exception("GitHub OAuth callback failed")
+        logger.exception("GitHub link mapping failed")
         raise HTTPException(status_code=400, detail=str(e))
 
 

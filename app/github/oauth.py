@@ -1,8 +1,11 @@
 """
-GitHub OAuth flow.
+GitHub auth — server-wide PAT (`GITHUB_PAT` env/secret).
 
-HTTP calls use synchronous httpx to avoid DNS resolution issues
-when called from Streamlit's async/sync mixed context.
+No per-user tokens stored in the database. The Connect Accounts page only
+records the slack→github_login mapping; the actual API calls always use the
+server PAT.
+
+Module name kept as `oauth.py` to avoid breaking imports.
 """
 
 import logging
@@ -15,27 +18,10 @@ from app.config import get_settings
 from app.models.user import User, UserGitHubLink
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
-
-
-def exchange_code_for_token(code: str) -> dict:
-    """Exchange OAuth code for GitHub access token."""
-    resp = requests.post(
-        "https://github.com/login/oauth/access_token",
-        json={
-            "client_id": settings.github_client_id,
-            "client_secret": settings.github_client_secret,
-            "code": code,
-        },
-        headers={"Accept": "application/json"},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    return resp.json()
 
 
 def get_github_user(access_token: str) -> dict:
-    """Fetch authenticated GitHub user profile."""
+    """Fetch authenticated GitHub user profile. Validates the token."""
     resp = requests.get(
         "https://api.github.com/user",
         headers={
@@ -48,20 +34,42 @@ def get_github_user(access_token: str) -> dict:
     return resp.json()
 
 
-async def link_github_to_user(
+def lookup_github_user_by_login(login: str) -> dict:
+    """Fetch a public GitHub profile by login using the server PAT."""
+    pat = (get_settings().github_pat or "").strip()
+    if not pat:
+        raise RuntimeError(
+            "GITHUB_PAT is not configured. Set it in env / Streamlit secrets."
+        )
+    resp = requests.get(
+        f"https://api.github.com/users/{login}",
+        headers={
+            "Authorization": f"Bearer {pat}",
+            "Accept": "application/vnd.github+json",
+        },
+        timeout=10,
+    )
+    if resp.status_code == 404:
+        raise ValueError(f"GitHub user @{login} not found.")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def link_github_login(
     db: AsyncSession,
     slack_user_id: str,
     slack_team_id: str,
-    code: str,
+    github_login: str,
 ) -> UserGitHubLink:
-    """Exchange OAuth code, fetch GitHub profile, store link (async — DB only)."""
-    # Sync HTTP calls — safe to call from async context
-    token_data = exchange_code_for_token(code)
-    access_token = token_data.get("access_token")
-    if not access_token:
-        raise ValueError(f"GitHub OAuth error: {token_data.get('error_description')}")
+    """Validate the GitHub login and store the slack→github mapping.
 
-    gh_user = get_github_user(access_token)
+    No PAT is stored — the server-wide `GITHUB_PAT` is used at sync time.
+    """
+    github_login = (github_login or "").strip().lstrip("@")
+    if not github_login:
+        raise ValueError("Empty GitHub login.")
+
+    gh_user = lookup_github_user_by_login(github_login)
 
     # Ensure User row exists
     user_result = await db.execute(
@@ -87,19 +95,15 @@ async def link_github_to_user(
     if link:
         link.github_user_id = gh_user["id"]
         link.github_login = gh_user["login"]
-        link.github_access_token = access_token
-        link.github_token_scope = token_data.get("scope", "")
     else:
         link = UserGitHubLink(
             slack_user_id=slack_user_id,
             slack_team_id=slack_team_id,
             github_user_id=gh_user["id"],
             github_login=gh_user["login"],
-            github_access_token=access_token,
-            github_token_scope=token_data.get("scope", ""),
         )
         db.add(link)
 
     await db.flush()
-    logger.info("Linked GitHub %s to Slack user %s", gh_user["login"], slack_user_id)
+    logger.info("Linked GitHub @%s to Slack user %s", gh_user["login"], slack_user_id)
     return link

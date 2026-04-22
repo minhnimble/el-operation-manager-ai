@@ -29,7 +29,12 @@ class User(Base):
 
 
 class UserGitHubLink(Base):
-    """Maps a Slack user to their GitHub handle and stores their OAuth token."""
+    """Maps a Slack user to their GitHub handle.
+
+    No PAT/token stored — GitHub auth uses the server-wide `GITHUB_PAT`
+    env var / Streamlit secret. This table is purely the slack→github
+    identity mapping (used as a routing key for Search API queries).
+    """
 
     __tablename__ = "user_github_links"
     __table_args__ = (
@@ -44,8 +49,6 @@ class UserGitHubLink(Base):
     slack_team_id: Mapped[str] = mapped_column(String(64))
     github_user_id: Mapped[int | None] = mapped_column()
     github_login: Mapped[str | None] = mapped_column(String(256))
-    github_access_token: Mapped[str | None] = mapped_column(String(512))
-    github_token_scope: Mapped[str | None] = mapped_column(String(512))
     linked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped[User] = relationship(back_populates="github_link")

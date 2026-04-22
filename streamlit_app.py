@@ -1,8 +1,8 @@
 """
 Engineering Operations Manager — Streamlit UI
 
-OAuth callbacks from Slack and GitHub both redirect to this root page.
-We detect the provider via the `state` query param prefix.
+OAuth callback from Slack redirects to this root page.
+GitHub uses a PAT pasted in the Connect page — no callback needed.
 """
 
 import asyncio
@@ -23,7 +23,6 @@ nest_asyncio.apply()
 
 from app.database import AsyncSessionLocal
 from app.slack.oauth import exchange_code, save_slack_token
-from app.github.oauth import link_github_to_user
 from app.config import get_settings
 
 settings = get_settings()
@@ -107,38 +106,8 @@ if "code" in params:
                 st.error(f"**Error:** {e}")
                 st.code(traceback.format_exc(), language="text")
 
-    # ── GitHub callback ────────────────────────────────────────────────────────
-    elif state.startswith("github:"):
-        with st.status("Connecting GitHub account...", expanded=True) as status:
-            try:
-                _, slack_team_id, slack_user_id = state.split(":", 2)
-
-                st.write("Exchanging OAuth code with GitHub...")
-                async def _github_cb():
-                    async with AsyncSessionLocal() as db:
-                        link = await link_github_to_user(
-                            db=db,
-                            slack_user_id=slack_user_id,
-                            slack_team_id=slack_team_id,
-                            code=code,
-                        )
-                        await db.commit()
-                        return link
-
-                link = run_async(_github_cb())
-                st.write("✓ GitHub account linked")
-
-                status.update(label="GitHub connected!", state="complete")
-                st.query_params.clear()
-                st.success(
-                    f"✅ GitHub connected as **@{link.github_login}**"
-                )
-                st.switch_page("pages/1_Connect.py")
-
-            except Exception as e:
-                status.update(label="GitHub connection failed", state="error")
-                st.error(f"**Error:** {e}")
-                st.code(traceback.format_exc(), language="text")
+    # GitHub OAuth callback removed — GitHub now uses PAT (paste in
+    # Connect Accounts page). Stale `state=github:*` URLs are ignored.
 
 
 # ─── Home Page ────────────────────────────────────────────────────────────────

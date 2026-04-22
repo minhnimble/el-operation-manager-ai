@@ -134,19 +134,16 @@ async def _get_github_links_batch(
     """Batch-fetch GitHub link info for multiple users in two queries.
 
     Returns {slack_user_id: (can_sync, github_login, uses_own_token)}.
-    can_sync is True when the member has either their own OAuth token OR a
-    github_login set manually (so the manager's token can be used as a proxy).
 
-    Resolution order:
-      1. UserGitHubLink (OAuth) — provides both token and login; uses_own_token=True
-      2. TeamMember.github_login (manual) — no token, uses manager's token
+    With PAT-only auth, `uses_own_token` is always False — the server-wide
+    `GITHUB_PAT` env/secret is always used. `can_sync` is True iff a
+    github_login is mapped (either via UserGitHubLink or TeamMember).
     """
     async with AsyncSessionLocal() as db:
-        # ── 1. OAuth-linked users ─────────────────────────────────────────────
-        oauth_result = await db.execute(
+        # ── 1. UserGitHubLink rows (login-only mapping) ──────────────────────
+        link_result = await db.execute(
             select(
                 UserGitHubLink.slack_user_id,
-                UserGitHubLink.github_access_token,
                 UserGitHubLink.github_login,
             ).where(
                 UserGitHubLink.slack_user_id.in_(slack_user_ids),
@@ -154,13 +151,12 @@ async def _get_github_links_batch(
             )
         )
         links: dict[str, tuple[bool, str, bool]] = {}
-        for row in oauth_result.all():
-            has_token = bool(row.github_access_token)
+        for row in link_result.all():
             has_login = bool(row.github_login)
             links[row.slack_user_id] = (
-                has_token or has_login,  # can_sync
+                has_login,                # can_sync
                 row.github_login or "",
-                has_token,               # uses_own_token
+                False,                    # uses_own_token (always False now)
             )
 
         # ── 2. Manually-set handles in TeamMember (for users not in OAuth table)
@@ -507,23 +503,28 @@ async def _get_github_credentials(
 ) -> tuple[str, str]:
     """Returns (access_token, github_login), or raises.
 
-    Resolution order:
-    1. Manager's GitHub OAuth token (app/global token) + member github_login.
-       Preferred path so all syncs run with the app/manager token.
-    2. Member's own GitHub OAuth token + member github_login.
-       Fallback when manager token is unavailable.
+    GitHub auth is now PAT-only via the `GITHUB_PAT` env/secret.
+    The DB stores only the slack→github_login mapping (no tokens).
+
+    `manager_user_id` is unused; kept for call-site compatibility.
     """
+    from app.config import get_settings as _gs
+    _server_pat = (_gs().github_pat or "").strip()
+    if not _server_pat:
+        raise RuntimeError(
+            "GITHUB_PAT is not configured. "
+            "Set it in env / Streamlit secrets (scopes: repo + read:org)."
+        )
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(UserGitHubLink).where(
+            select(UserGitHubLink.github_login).where(
                 UserGitHubLink.slack_user_id == slack_user_id,
                 UserGitHubLink.slack_team_id == slack_team_id,
             )
         )
-        link = result.scalar_one_or_none()
+        member_login = result.scalar_one_or_none()
 
-        # Member GitHub login can come from OAuth link or TeamMember mapping.
-        member_login = link.github_login if link else None
         if not member_login:
             tm_result = await db.execute(
                 select(TeamMember.github_login).where(
@@ -535,50 +536,31 @@ async def _get_github_credentials(
             )
             member_login = tm_result.scalar_one_or_none()
 
-        # ── Case 1: prefer manager/app token ─────────────────────────────────
-        if member_login and manager_user_id:
-            mgr_result = await db.execute(
-                select(UserGitHubLink).where(
-                    UserGitHubLink.slack_user_id == manager_user_id,
-                    UserGitHubLink.slack_team_id == slack_team_id,
-                )
+        if not member_login:
+            raise RuntimeError(
+                f"No GitHub login mapped for Slack user {slack_user_id}. "
+                "Set the github_login on the Connect or Team Overview page."
             )
-            mgr_link = mgr_result.scalar_one_or_none()
-            if mgr_link and mgr_link.github_access_token:
-                return mgr_link.github_access_token, member_login
 
-        # ── Case 2: fallback to member token ─────────────────────────────────
-        if link and link.github_access_token and link.github_login:
-            return link.github_access_token, link.github_login
-
-        raise RuntimeError(
-            "No GitHub token available. "
-            "Connect your GitHub account first (app/global manager token), "
-            "or have the member connect their own GitHub account."
-        )
+        return _server_pat, member_login
 
 
 async def _get_github_link_info(slack_user_id: str, slack_team_id: str) -> tuple[bool, str, bool]:
     """Returns (can_sync, github_login, uses_own_token).
 
-    can_sync     — True if we have enough info to sync (own token OR handle set)
-    github_login — the GitHub handle, empty string if unknown
-    uses_own_token — True when the member's own OAuth token will be used
+    PAT-only auth: `uses_own_token` is always False. `can_sync` is True iff
+    a github_login mapping exists for the user.
     """
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(UserGitHubLink).where(
+            select(UserGitHubLink.github_login).where(
                 UserGitHubLink.slack_user_id == slack_user_id,
                 UserGitHubLink.slack_team_id == slack_team_id,
             )
         )
-        link = result.scalar_one_or_none()
-        if link:
-            has_token = bool(link.github_access_token)
-            has_login = bool(link.github_login)
-            can_sync = has_token or has_login
-            if can_sync:
-                return can_sync, link.github_login or "", has_token
+        login = result.scalar_one_or_none()
+        if login:
+            return True, login, False
 
         tm_result = await db.execute(
             select(TeamMember.github_login).where(
@@ -620,6 +602,31 @@ async def _sync_github_repo(
                 slack_user_id=slack_user_id,
                 repo=repo,
                 since=since,
+            )
+            await db.commit()
+            return counts
+        finally:
+            await ingester.close()
+
+
+async def _sync_github_via_search(
+    access_token: str,
+    github_login: str,
+    slack_team_id: str,
+    slack_user_id: str,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[str, int]:
+    """Overview-mode sync — Search API, cross-org, no repo loop."""
+    async with AsyncSessionLocal() as db:
+        ingester = GitHubIngester(access_token=access_token, github_login=github_login)
+        try:
+            counts = await ingester.ingest_via_search(
+                db=db,
+                slack_team_id=slack_team_id,
+                slack_user_id=slack_user_id,
+                since=since,
+                until=until,
             )
             await db.commit()
             return counts
@@ -901,6 +908,9 @@ def _run_github_sync_bg(
     since: "datetime",
     my_gen: int,
     manager_user_id: str | None = None,
+    *,
+    use_overview_mode: bool = False,
+    until: "datetime | None" = None,
 ) -> None:
     """Runs in a daemon thread — updates `job` dict with live progress.
 
@@ -941,6 +951,33 @@ def _run_github_sync_bg(
                 gh_token, github_login = _run(_get_github_credentials(
                     target_user_id, slack_team_id, manager_user_id=manager_user_id,
                 ))
+
+                # ── Overview / Search-API mode ────────────────────────────
+                if use_overview_mode:
+                    _jlog(
+                        job,
+                        f"  🔍 Overview mode: search PRs authored/reviewed by "
+                        f"@{github_login} across all orgs…",
+                    )
+                    job["progress"] = int((idx + 0.5) / total_members * 94)
+                    counts = _run(_sync_github_via_search(
+                        gh_token, github_login, slack_team_id,
+                        target_user_id, since, until,
+                    ))
+                    added = sum(counts.values())
+                    if added:
+                        parts = ", ".join(f"{v} {k}" for k, v in counts.items() if v)
+                        _jlog(job, f"    ✓ {parts}")
+                    else:
+                        _jlog(job, "    ✓ nothing new")
+                    for k, v in counts.items():
+                        grand[k] = grand.get(k, 0) + v
+                    member_summary = ", ".join(f"{v} {k}" for k, v in counts.items() if v) or "nothing new"
+                    ms["status"] = "✅"
+                    ms["detail"] = member_summary
+                    _jlog(job, f"  → {member_summary}")
+                    continue
+
                 _jlog(job, f"  📋 Loading repos for @{github_login}…")
                 repos = _run(_get_github_repos(gh_token, github_login))
                 _jlog(job, f"  Found {len(repos)} repo(s).")
@@ -1409,6 +1446,21 @@ if members_with_gh:
             "to link a GitHub account with access to their activity."
         )
 
+    _use_overview = st.toggle(
+        "🔭 Overview mode (Search API, cross-org, faster)",
+        value=True,
+        key="_gh_overview_mode",
+        help=(
+            "Mirrors the GitHub user overview page "
+            "(github.com/<user>?tab=overview&from=...&to=...). "
+            "Uses the Search API with your PAT to find PRs the member "
+            "**created** and **reviewed** across **all organizations** they "
+            "belong to — even ones you don't list as repos. Skips commits "
+            "(commit-search is heavily rate-limited). "
+            "Disable to fall back to per-repo iteration."
+        ),
+    )
+
     if st.button("Sync GitHub", type="primary"):
         # Bump the GitHub gen counter — supersedes any older daemon thread.
         my_gh_gen = _bump_github_gen()
@@ -1419,6 +1471,10 @@ if members_with_gh:
             target=_run_github_sync_bg,
             args=(job, slack_team_id, members_with_gh, gh_info, sync_start,
                   my_gh_gen, slack_user_id),
+            kwargs={
+                "use_overview_mode": _use_overview,
+                "until": sync_end,
+            },
             daemon=True,
         ).start()
         st.rerun()

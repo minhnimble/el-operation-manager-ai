@@ -23,9 +23,15 @@ class Settings(BaseSettings):
     slack_signing_secret: str = ""
     slack_app_token: str = ""
 
-    # GitHub
-    github_client_id: str = ""
-    github_client_secret: str = ""
+    # GitHub — Personal Access Token (PAT).
+    #
+    # Resolution order at sync time:
+    #   1. `github_pat` env/secret (server-wide manager token, this field)
+    #   2. Member's own PAT stored in UserGitHubLink (optional fallback)
+    #
+    # Recommended: set `GITHUB_PAT` in env/secrets. One PAT covers the team.
+    # Required scopes: repo + read:org.
+    github_pat: str = ""
 
     # Anthropic
     anthropic_api_key: str = ""

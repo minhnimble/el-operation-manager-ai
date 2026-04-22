@@ -869,7 +869,38 @@ _GITHUB_ICONS = {
     "issue_comment":"💬",
 }
 
-with st.expander(f"GitHub Activity ({len(github_items)} items)", expanded=len(github_items) > 0):
+# ── PR links grouped by category (Created / Merged / Reviewed) ──────────────
+_pr_created  = [a for a in github_items if a["type"] == "pr_opened"]
+_pr_merged   = [a for a in github_items if a["type"] == "pr_merged"]
+_pr_reviewed = [a for a in github_items if a["type"] == "pr_review"]
+
+def _render_pr_links(label: str, items: list, icon: str) -> None:
+    with st.expander(f"{icon} {label} ({len(items)})", expanded=len(items) > 0 and len(items) <= 30):
+        if not items:
+            st.caption("None in this period.")
+            return
+        # de-dupe by URL — pr_review entries are per-review, collapse to per-PR
+        seen: set[str] = set()
+        for it in sorted(items, key=lambda x: x.get("timestamp") or "", reverse=True):
+            url = it.get("url") or ""
+            key = url.split("#")[0] if url else (it.get("title") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            repo  = f"`{it['github_repo']}`" if it.get("github_repo") else ""
+            title = it.get("title") or "(no title)"
+            ts    = it.get("timestamp", "")
+            if url:
+                st.markdown(f"- [{title}]({url}) &nbsp; {repo} &nbsp; · _{ts}_")
+            else:
+                st.markdown(f"- {title} &nbsp; {repo} &nbsp; · _{ts}_")
+
+st.markdown("#### 🔗 Pull Request Links")
+_render_pr_links("PRs Created (open)",  _pr_created,  "🔀")
+_render_pr_links("PRs Merged",          _pr_merged,   "✅")
+_render_pr_links("PRs Reviewed",        _pr_reviewed, "👀")
+
+with st.expander(f"GitHub Activity ({len(github_items)} items)", expanded=False):
     if not github_items:
         st.info("No GitHub activity in this period.")
     else:

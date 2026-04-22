@@ -1,14 +1,12 @@
 """
 Connect Accounts page.
 
-Handles Sign in with Slack and GitHub OAuth linking.
-Both providers redirect back to the root URL (streamlit_app.py)
-where the code exchange is completed.
+Slack uses Sign-in-with-Slack OAuth (callback handled in streamlit_app.py).
+GitHub uses a Personal Access Token (PAT) pasted directly here — no OAuth.
 """
 
 import asyncio
 import secrets
-from urllib.parse import quote
 
 import streamlit as st
 
@@ -22,6 +20,7 @@ from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.models.slack_token import SlackUserToken
 from app.models.user import UserGitHubLink
+from app.github.oauth import link_github_login
 from app.slack.oauth import build_auth_url
 
 st.set_page_config(page_title="Connect Accounts", page_icon="🔗", layout="wide")
@@ -204,15 +203,25 @@ st.markdown("---")
 
 st.subheader("GitHub")
 
+_server_pat_set = bool((settings.github_pat or "").strip())
+
+if not _server_pat_set:
+    st.error(
+        "❌ **`GITHUB_PAT` is not configured.** Set it in env / Streamlit "
+        "secrets (scopes: `repo` + `read:org`) and reboot. GitHub sync is "
+        "disabled until then."
+    )
+else:
+    st.success(
+        "✅ Server-wide GitHub PAT loaded from env. "
+        "Map your GitHub login below so the app knows whose PRs to query."
+    )
+
 if not slack_user_id:
     st.warning("Connect Slack first to enable GitHub linking.")
 else:
     from app.ui.page_utils import loading_section
 
-    # Cache the GitHub link status in session_state so navigating away and
-    # back to this page doesn't re-hit the DB (and doesn't flash the
-    # "Checking connection status…" skeleton every time). Cache is keyed
-    # by (slack_user_id, slack_team_id) and invalidated on disconnect.
     _cache_key = (slack_user_id, slack_team_id)
     _cached = st.session_state.get("_gh_status_cache")
     _force_refresh = st.session_state.pop("_gh_just_disconnected", False)
@@ -220,8 +229,6 @@ else:
     if _cached and _cached["key"] == _cache_key and not _force_refresh:
         status = _cached["status"]
     elif _force_refresh:
-        # Post-disconnect: fetch fresh without a skeleton; the disconnect
-        # spinner already conveyed that work was happening.
         status = run(_get_github_status(slack_user_id, slack_team_id))
         st.session_state["_gh_status_cache"] = {"key": _cache_key, "status": status}
     else:
@@ -229,52 +236,76 @@ else:
             status = run(_get_github_status(slack_user_id, slack_team_id))
         st.session_state["_gh_status_cache"] = {"key": _cache_key, "status": status}
 
-    if status["github_connected"]:
-        # Single-slot rendering: the whole connected-state UI lives inside
-        # `gh_slot`. On disconnect we `.empty()` the slot and re-fill it with
-        # the spinner, so the browser never sees the Disconnect button sitting
-        # next to the spinner (the cause of the "two disconnect buttons" flash).
-        gh_slot = st.empty()
-        reconnect_slot = st.empty()
+    async def _save_login(login: str) -> str:
+        async with AsyncSessionLocal() as db:
+            link = await link_github_login(
+                db=db,
+                slack_user_id=slack_user_id,
+                slack_team_id=slack_team_id,
+                github_login=login,
+            )
+            await db.commit()
+            return link.github_login
 
+    if status["github_connected"]:
+        gh_slot = st.empty()
         with gh_slot.container():
             col1, col2 = st.columns([4, 1])
-            col1.success(f"✅ Connected as **@{status['github_login']}**")
+            col1.success(f"✅ Linked to GitHub login **@{status['github_login']}**")
             disconnect_clicked = col2.button("Disconnect", key="disconnect_github")
 
-        github_state = f"github:{slack_team_id}:{slack_user_id}"
-        github_url = (
-            f"https://github.com/login/oauth/authorize"
-            f"?client_id={settings.github_client_id}"
-            f"&scope=read:user,repo"
-            f"&state={github_state}"
-            f"&redirect_uri={quote(settings.app_base_url, safe='')}"
-        )
-        with reconnect_slot.container():
-            _oauth_button("Reconnect GitHub (refresh token / scopes)", github_url, primary=False)
+        with st.expander("Change GitHub login"):
+            new_login = st.text_input(
+                "GitHub username",
+                key="_gh_login_update",
+                placeholder="octocat",
+            )
+            if st.button("Save", key="_gh_login_save_update"):
+                try:
+                    with st.spinner("Validating with GitHub…"):
+                        login = run(_save_login(new_login))
+                    st.session_state.pop("_gh_status_cache", None)
+                    st.success(f"✅ Updated — now linked to **@{login}**")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed: {e}")
 
         if disconnect_clicked:
-            # Clear the connected UI first so only the spinner is visible
-            # while the delete runs.
             gh_slot.empty()
-            reconnect_slot.empty()
             with gh_slot.container():
-                with st.spinner("Disconnecting GitHub…"):
+                with st.spinner("Removing GitHub link…"):
                     run(_disconnect_github(slack_user_id, slack_team_id))
             st.session_state.pop("_gh_status_cache", None)
             st.session_state["_gh_just_disconnected"] = True
             st.rerun()
     else:
-        st.info("Link your GitHub account to enable commit and PR tracking.")
-        github_state = f"github:{slack_team_id}:{slack_user_id}"
-        github_url = (
-            f"https://github.com/login/oauth/authorize"
-            f"?client_id={settings.github_client_id}"
-            f"&scope=read:user,repo"
-            f"&state={github_state}"
-            f"&redirect_uri={quote(settings.app_base_url, safe='')}"
+        st.info(
+            "Enter your **GitHub username** so the app knows whose PRs and "
+            "reviews to fetch using the server PAT."
         )
-        _oauth_button("Connect GitHub", github_url)
+        login = st.text_input(
+            "GitHub username",
+            key="_gh_login_new",
+            placeholder="octocat",
+            disabled=not _server_pat_set,
+        )
+        if st.button(
+            "Link GitHub",
+            type="primary",
+            key="_gh_login_save_new",
+            disabled=not _server_pat_set,
+        ):
+            if not login.strip():
+                st.warning("Enter a GitHub username first.")
+            else:
+                try:
+                    with st.spinner("Validating with GitHub…"):
+                        login_saved = run(_save_login(login))
+                    st.session_state.pop("_gh_status_cache", None)
+                    st.success(f"✅ Linked to **@{login_saved}**")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed: {e}")
 
 st.markdown("---")
 
@@ -286,8 +317,12 @@ with st.expander("How does this work?"):
     to public channels you're a member of. No messages are read in real time —
     data is pulled on demand when you trigger a sync.
 
-    **GitHub** uses GitHub OAuth. We request `read:user` and `repo` scopes to
-    pull your commits, pull requests, and code reviews.
+    **GitHub** uses a single server-wide Personal Access Token (PAT) configured
+    via the `GITHUB_PAT` env var / Streamlit secret. Needed scopes: `repo` +
+    `read:org`. Rotate by updating the secret and rebooting.
+
+    No PAT is stored in the database. This page only records the
+    slack→github_login mapping — used as a routing key for Search API queries.
 
     Neither connection shares your data with third parties.
     All data is stored in your own database.

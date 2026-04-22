@@ -307,6 +307,154 @@ class GitHubIngester:
         )
         return counts
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Overview / Search-API mode — mirrors what the GitHub overview page shows
+    # (https://github.com/<user>?tab=overview&from=YYYY-MM-DD&to=YYYY-MM-DD).
+    #
+    # Uses the Search API so we get PRs across **all** organizations the PAT
+    # can see, without iterating every repo. Far faster and cross-org.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def _search_issues(self, query: str, max_pages: int = 10) -> list[dict]:
+        """Paginate /search/issues. Hard-capped (Search API max = 1000 results)."""
+        results: list[dict] = []
+        for page in range(1, max_pages + 1):
+            data = await self._get(
+                "/search/issues",
+                {"q": query, "per_page": 100, "page": page, "sort": "created", "order": "desc"},
+            )
+            items = (data or {}).get("items", []) if isinstance(data, dict) else []
+            if not items:
+                break
+            results.extend(items)
+            if len(items) < 100:
+                break
+        return results
+
+    @staticmethod
+    def _repo_full_name_from_url(repo_url: str) -> str:
+        # repository_url looks like "https://api.github.com/repos/owner/repo"
+        return "/".join(repo_url.rstrip("/").split("/")[-2:])
+
+    async def ingest_via_search(
+        self,
+        db: AsyncSession,
+        slack_team_id: str,
+        slack_user_id: str,
+        since: datetime,
+        until: datetime | None = None,
+    ) -> dict[str, int]:
+        """Ingest PRs created and reviewed by `self.github_login` in [since, until].
+
+        Mirrors the GitHub user overview page. Cross-org, single PAT.
+        Skips commits (Search API for commits is heavily rate-limited).
+        """
+        counts: dict[str, int] = {"prs": 0, "reviews": 0}
+        s_date = since.date().isoformat()
+        u_date = (until or datetime.utcnow()).date().isoformat()
+        date_range = f"{s_date}..{u_date}"
+
+        # ── PRs authored ─────────────────────────────────────────────────────
+        try:
+            authored = await self._search_issues(
+                f"is:pr author:{self.github_login} created:{date_range}"
+            )
+        except Exception as e:
+            logger.warning("Search authored PRs failed for %s: %s", self.github_login, e)
+            authored = []
+
+        for pr in authored:
+            repo_name = self._repo_full_name_from_url(pr.get("repository_url", ""))
+            pr_number = pr.get("number")
+            if not pr_number or not repo_name:
+                continue
+            merged_at = (pr.get("pull_request") or {}).get("merged_at")
+            pr_type = "pr_merged" if merged_at else "pr_opened"
+            await self._upsert_activity(
+                db,
+                slack_team_id=slack_team_id,
+                slack_user_id=slack_user_id,
+                activity_type=pr_type,
+                repo_full_name=repo_name,
+                ref_id=str(pr_number),
+                title=(pr.get("title") or "")[:512],
+                url=pr.get("html_url"),
+                raw_payload={
+                    "number": pr_number,
+                    "title": pr.get("title"),
+                    "state": pr.get("state"),
+                    "draft": pr.get("draft"),
+                    "labels": [l.get("name") for l in pr.get("labels", [])],
+                    "created_at": pr.get("created_at"),
+                    "merged_at": merged_at,
+                    "via": "search",
+                },
+                activity_at=datetime.fromisoformat(
+                    pr["created_at"].replace("Z", "+00:00")
+                ).replace(tzinfo=None),
+            )
+            counts["prs"] += 1
+
+        # ── PRs reviewed (exclude self-authored) ─────────────────────────────
+        try:
+            reviewed = await self._search_issues(
+                f"is:pr reviewed-by:{self.github_login} -author:{self.github_login} "
+                f"updated:{date_range}"
+            )
+        except Exception as e:
+            logger.warning("Search reviewed PRs failed for %s: %s", self.github_login, e)
+            reviewed = []
+
+        for pr in reviewed:
+            repo_name = self._repo_full_name_from_url(pr.get("repository_url", ""))
+            pr_number = pr.get("number")
+            if not pr_number or not repo_name:
+                continue
+            try:
+                reviews = await self.get_pr_reviews(repo_name, pr_number)
+            except Exception as e:
+                logger.warning("get_pr_reviews failed %s#%s: %s", repo_name, pr_number, e)
+                continue
+
+            for review in reviews:
+                if (review.get("user") or {}).get("login") != self.github_login:
+                    continue
+                submitted = review.get("submitted_at")
+                if submitted:
+                    sub_dt = datetime.fromisoformat(submitted.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if sub_dt < since:
+                        continue
+                    if until and sub_dt > until:
+                        continue
+                else:
+                    sub_dt = datetime.utcnow()
+
+                review_key = f"{pr_number}-{review['id']}"
+                await self._upsert_activity(
+                    db,
+                    slack_team_id=slack_team_id,
+                    slack_user_id=slack_user_id,
+                    activity_type="pr_review",
+                    repo_full_name=repo_name,
+                    ref_id=review_key,
+                    title=f"Review on PR #{pr_number}: {(pr.get('title') or '')[:400]}",
+                    url=review.get("html_url") or pr.get("html_url"),
+                    raw_payload={
+                        "pr_number": pr_number,
+                        "state": review.get("state"),
+                        "submitted_at": submitted,
+                        "via": "search",
+                    },
+                    activity_at=sub_dt,
+                )
+                counts["reviews"] += 1
+
+        logger.info(
+            "GitHub overview-search ingest for %s [%s..%s]: %s",
+            self.github_login, s_date, u_date, counts,
+        )
+        return counts
+
     async def _upsert_activity(
         self,
         db: AsyncSession,
@@ -334,16 +482,19 @@ class GitHubIngester:
 async def get_github_ingester(
     db: AsyncSession, slack_user_id: str, slack_team_id: str
 ) -> GitHubIngester | None:
+    """Build an ingester using the server-wide PAT + the user's stored login."""
+    from app.config import get_settings
+    pat = (get_settings().github_pat or "").strip()
+    if not pat:
+        return None
+
     result = await db.execute(
-        select(UserGitHubLink).where(
+        select(UserGitHubLink.github_login).where(
             UserGitHubLink.slack_user_id == slack_user_id,
             UserGitHubLink.slack_team_id == slack_team_id,
         )
     )
-    link = result.scalar_one_or_none()
-    if not link or not link.github_access_token or not link.github_login:
+    login = result.scalar_one_or_none()
+    if not login:
         return None
-    return GitHubIngester(
-        access_token=link.github_access_token,
-        github_login=link.github_login,
-    )
+    return GitHubIngester(access_token=pat, github_login=login)

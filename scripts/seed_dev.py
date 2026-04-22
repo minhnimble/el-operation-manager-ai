@@ -63,7 +63,6 @@ async def seed():
                 slack_user_id=u["id"],
                 slack_team_id=TEAM_ID,
                 github_login=u["github"],
-                github_access_token="fake-token",
             )
             db.add(link)
 

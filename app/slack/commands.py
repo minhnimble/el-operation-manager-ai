@@ -96,16 +96,7 @@ def cmd_link_github(ack, command, respond) -> None:
     from app.config import get_settings
     settings = get_settings()
 
-    user_id = command["user_id"]
-    team_id = command["team_id"]
-    state = f"{team_id}:{user_id}"
-    github_oauth_url = (
-        f"https://github.com/login/oauth/authorize"
-        f"?client_id={settings.github_client_id}"
-        f"&scope=read:user,repo"
-        f"&state={state}"
-        f"&redirect_uri={settings.app_base_url}/auth/github/callback"
-    )
+    connect_url = f"{settings.app_base_url}/Connect"
 
     respond(
         blocks=[
@@ -114,8 +105,11 @@ def cmd_link_github(ack, command, respond) -> None:
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        "Connect your GitHub account to enable commit + PR tracking.\n\n"
-                        f"<{github_oauth_url}|Click here to authorize GitHub access>"
+                        "GitHub now uses a *Personal Access Token (PAT)* — no OAuth flow.\n\n"
+                        "1. Create a PAT at "
+                        "<https://github.com/settings/tokens/new?description=Engineering+Operations+Manager&scopes=repo,read:org|github.com/settings/tokens> "
+                        "with scopes `repo` + `read:org`.\n"
+                        f"2. Paste it on the <{connect_url}|Connect Accounts page>."
                     ),
                 },
             }
