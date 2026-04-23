@@ -105,10 +105,21 @@ def _is_in_progress_text(text: str) -> bool:
     clean = _strip_objective_prefix(text).strip()
     if not clean:
         return False
-    first_word = clean.split()[0]
-    # Trim trailing punctuation that could throw off the -ing check.
-    first_word = re.sub(r"[^a-zA-Z]+$", "", first_word)
-    return len(first_word) > 3 and first_word.lower().endswith("ing")
+    # Check the first up-to-2 leading words so a phrase like
+    # "Actively raising concerns …" still registers — "Actively" is a
+    # leading adverb (ends in "ly"), and "raising" is the real V-ing
+    # head. Without this, any adverb prefix masks the V-ing signal.
+    words = clean.split()[:2]
+    for i, w in enumerate(words):
+        w_clean = re.sub(r"[^a-zA-Z]+$", "", w)
+        if len(w_clean) > 3 and w_clean.lower().endswith("ing"):
+            return True
+        # Only allow one leading adverb (ends in "ly") before the V-ing;
+        # past the first token we stop so we don't scan mid-sentence.
+        if i == 0 and w_clean.lower().endswith("ly"):
+            continue
+        break
+    return False
 
 
 def _is_focus_objective(text: str) -> bool:
@@ -132,11 +143,14 @@ def _has_focus_intent(todos: list[NotionBlock]) -> bool:
     the user's back.
 
     Returns True iff any direct unchecked to-do under the skill is phrased as
-    either an in-progress objective (V-ing first word, or explicit
-    ``In-progress:`` / ``In-review:`` prefix) or a pending-focus objective
-    (``New objective:`` / ``To-review objective:``). Checked to-dos,
-    paragraph-only "TBD" skills, and past-form completed objectives all
-    yield False.
+    either an in-progress objective (V-ing first word — optionally preceded
+    by a single leading adverb — or explicit ``In-progress:`` / ``In-review:``
+    prefix) or a pending-focus objective (``New objective:`` /
+    ``To-review objective:``). Checked to-dos, paragraph-only "TBD" skills,
+    and past-form completed objectives all yield False.
+
+    The skill *name* is intentionally not consulted — focus is always driven
+    by the to-do items under a skill, never by the skill title itself.
     """
     for td in todos:
         if td.checked:
