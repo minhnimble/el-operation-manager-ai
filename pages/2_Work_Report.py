@@ -101,6 +101,25 @@ def _format_standup_body(text: str) -> str:
 
     text = re.sub(r"(\S) +(\*\S)", lambda m: m.group(1) + "\n\n" + m.group(2), text)
 
+    # Break any non-bullet inline answer onto its own line, right under the
+    # bold question header.  Standup bodies store the header, a trailing
+    # emoji (🖖 / 🧑‍🍳 / 🧐), then an optional label like ``JB:`` or a free
+    # answer like ``All good`` before the first bullet (or end-of-body).
+    # Without this break the label hugs the emoji on the same visual line
+    # as the question, which is hard to scan.
+    #
+    # Pattern:
+    #   group 1: closing ``*…*`` of the bold header + the emoji/glyphs
+    #            immediately attached to it (``\S+`` — no spaces).
+    #   group 2: the inline answer run, up to (but not consuming) the
+    #            first bullet or end-of-string.  Non-greedy so the
+    #            lookahead anchors to the *first* bullet, not the last.
+    text = re.sub(
+        r"(\*[^*]+\*\S+)\s+([^•]+?)(?=\s*(?:•|$))",
+        r"\1<br>\2",
+        text,
+    )
+
     text = re.sub(r" *• +", "<br>• ", text)
     text = re.sub(r" *◦ +", "<br>&nbsp;&nbsp;◦ ", text)
 
