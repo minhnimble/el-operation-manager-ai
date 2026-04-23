@@ -52,45 +52,57 @@ def _format_standup_body(text: str) -> str:
     some clients and as a single flowed line in others, so we normalise first
     and then rebuild the structure deterministically.
 
-    Rendering strategy — flat lines with literal bullets
+    Rendering strategy — flat lines with literal bullets + inline HTML
       We keep Slack's ``•`` / ``◦`` glyphs and split each one onto its own
-      line with a soft markdown line break (``  \\n`` → ``<br>``).  The
-      sub-bullet is prefixed with two non-breaking spaces so it sits just
-      to the right of the ``•`` above it.
+      line.  The sub-bullet is prefixed with two spaces so it sits just to
+      the right of the ``•`` above it.
 
-      A prior iteration tried real nested ``<ul>`` lists, which rendered
-      with correct indent but introduced Streamlit's loose-list vertical
-      margins between every item — the paragraph-per-``<li>`` spacing made
-      the block feel airy and broken.  A single ``<br>``-separated flow
-      keeps everything tight, which matches how Slack itself renders the
-      original standup.
+      Pitfalls ruled out by earlier iterations:
+        * A real nested ``<ul>`` list rendered with correct indent but
+          introduced Streamlit's loose-list vertical margins between every
+          item — the paragraph-per-``<li>`` spacing made the block feel
+          airy and broken.
+        * A Markdown soft line break (``  \\n``) with U+00A0 leading spaces
+          looked right in isolation but Streamlit's frontend markdown
+          parser eats leading whitespace (including non-breaking space) at
+          parse time, before HTML layout — so the indent vanished.
 
-      Leading ASCII spaces after ``<br>`` get collapsed by HTML, so we use
-      U+00A0 (non-breaking space) for the ``◦`` indent — those survive.
+      What actually renders the indent reliably is emitting the line break
+      and the leading spaces as inline HTML: ``<br>&nbsp;&nbsp;◦ …``.
+      Inline HTML bypasses the line-oriented Markdown parsing, and the
+      numeric/named entities are emitted straight through to the DOM.
+      The call site opts into this by passing ``unsafe_allow_html=True``.
 
     Steps:
       1. Collapse existing newlines to spaces so both stored formats are
          handled consistently.
       2. Insert a paragraph break before each ``*bold header*`` that follows
          content, so the next question starts a new paragraph.
-      3. Put each ``•`` on its own soft-broken line.
-      4. Put each ``◦`` on its own soft-broken line, indented with two
-         non-breaking spaces so it nests just under the parent ``•``.
+      3. Put each ``•`` on its own line via a literal ``<br>``.
+      4. Put each ``◦`` on its own line via ``<br>`` plus two ``&nbsp;``
+         entities so it nests just under the parent ``•``.
     """
+    import html
     import re
 
     text = text.strip()
     if not text:
         return text
 
+    # Escape any HTML-special characters the user may have typed into Slack.
+    # The standup expander renders the output with unsafe_allow_html=True so
+    # our injected <br>/&nbsp; survive; escaping first makes sure any raw
+    # ``<script>``, ``<img …>`` etc. in the source body are inert by the
+    # time we inject trusted HTML tokens below.  Markdown syntax (``*``,
+    # ``[..](..)``, emoji shortcodes) is unaffected by html.escape.
+    text = html.escape(text, quote=False)
+
     text = re.sub(r"\s*\n\s*", " ", text).strip()
 
     text = re.sub(r"(\S) +(\*\S)", lambda m: m.group(1) + "\n\n" + m.group(2), text)
 
-    text = re.sub(r" *• +", "  \n• ", text)
-
-    _SUB_INDENT = "\u00A0" * 2
-    text = re.sub(r" *◦ +", f"  \n{_SUB_INDENT}◦ ", text)
+    text = re.sub(r" *• +", "<br>• ", text)
+    text = re.sub(r" *◦ +", "<br>&nbsp;&nbsp;◦ ", text)
 
     return text.strip()
 
@@ -985,7 +997,14 @@ with st.expander(f"Standups ({len(standups)})", expanded=len(standups) > 0):
                 # Copy button still copies just the text body (not the images)
                 _copy_button(body or raw_text, key=f"copy_standup_{_i}")
             if body:
-                st.markdown(body)
+                # unsafe_allow_html=True is required so the <br> line breaks
+                # and &nbsp; sub-bullet indents produced by _format_standup_body
+                # reach the DOM instead of being escaped.  body is built from
+                # trusted sources (Slack text that has already been passed
+                # through _format_slack_text) plus a small fixed set of HTML
+                # tokens we emit ourselves, so there is no user-driven HTML
+                # injection path here.
+                st.markdown(body, unsafe_allow_html=True)
             _render_slack_attachments(files, _slack_token)
             st.divider()
 
