@@ -101,21 +101,28 @@ def _format_standup_body(text: str) -> str:
 
     text = re.sub(r"(\S) +(\*\S)", lambda m: m.group(1) + "\n\n" + m.group(2), text)
 
-    # Break any non-bullet inline answer onto its own line, right under the
-    # bold question header.  Standup bodies store the header, a trailing
-    # emoji (🖖 / 🧑‍🍳 / 🧐), then an optional label like ``JB:`` or a free
-    # answer like ``All good`` before the first bullet (or end-of-body).
-    # Without this break the label hugs the emoji on the same visual line
-    # as the question, which is hard to scan.
+    # Break the inline answer onto its own line, right under the question
+    # header.  Standuply reposts each question trailing with a signature
+    # emoji — 🖖 (yesterday), 🧑‍🍳 (today), 🧐 (blockers) — followed by
+    # either a label like ``JB:`` / ``EL:`` or a free answer like
+    # ``All good`` before the first bullet (or end-of-body).  Without
+    # this break the answer hugs the emoji on the same visual line as
+    # the question, which is hard to scan.
     #
-    # Pattern:
-    #   group 1: closing ``*…*`` of the bold header + the emoji/glyphs
-    #            immediately attached to it (``\S+`` — no spaces).
-    #   group 2: the inline answer run, up to (but not consuming) the
-    #            first bullet or end-of-string.  Non-greedy so the
-    #            lookahead anchors to the *first* bullet, not the last.
+    # Keyed off the emoji instead of Slack bold markers because the
+    # stored payload may or may not carry ``*…*`` — the emojis are the
+    # reliable anchor.
+    #
+    # Non-greedy ``[^•]+?`` with the lookahead ``\s*(?:•|$)`` ensures we
+    # stop at the *first* bullet (or end-of-body) — not the last —
+    # otherwise a stray ``:`` mid-bullet (e.g. ``… on JB Android. EL:``)
+    # would be swept in.
+    # NOTE: ``\u200d`` must be interpreted as the literal ZWJ codepoint,
+    # so the pattern is a non-raw f-string — a raw string would keep the
+    # escape as four literal characters and the 🧑‍🍳 alt would never
+    # match the ZWJ-joined glyph in the source.
     text = re.sub(
-        r"(\*[^*]+\*\S+)\s+([^•]+?)(?=\s*(?:•|$))",
+        "(🖖|🧑\u200d🍳|🧐)\\s+([^•]+?)(?=\\s*(?:•|$))",
         r"\1<br>\2",
         text,
     )
