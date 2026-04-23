@@ -1176,37 +1176,66 @@ def _build_share_text(r: "WorkReport") -> str:
         import re as _re
         from collections import defaultdict as _dd
 
-        def _bullets_only(text: str) -> list[str]:
-            """Strip *question headers* and return only the bullet answer lines."""
-            # Normalise newlines
+        def _bullets_only(text: str) -> list[tuple[str, list[str]]]:
+            """Strip ``*question headers*`` and return answer bullets grouped
+            with their sub-bullets.
+
+            Returns a list of ``(parent, [sub, sub, ...])`` tuples so the
+            two-level Slack structure (``•`` answer → ``◦`` detail) can be
+            preserved in the text-art summary instead of collapsing into a
+            single flat line.  Sub-bullet list is empty when the answer had
+            no ``◦`` detail rows.
+            """
             flat = _re.sub(r"\s*\n\s*", " ", text).strip()
             # Remove *bold question sections* (everything inside *...*)
             flat = _re.sub(r"\*[^*]+\*", "", flat)
-            # Split on bullet markers and clean up
-            parts = _re.split(r"\s*•\s*", flat)
-            return [p.strip() for p in parts if p.strip()]
+            # Split on top-level ``•`` first, then each chunk on ``◦``.  The
+            # first ``◦``-split token is the answer parent, the rest are its
+            # nested detail bullets.
+            results: list[tuple[str, list[str]]] = []
+            for _chunk in _re.split(r"\s*•\s*", flat):
+                _chunk = _chunk.strip()
+                if not _chunk:
+                    continue
+                _sub_parts = _re.split(r"\s*◦\s*", _chunk)
+                _parent = _sub_parts[0].strip()
+                _subs = [s.strip() for s in _sub_parts[1:] if s.strip()]
+                if not _parent and not _subs:
+                    continue
+                results.append((_parent, _subs))
+            return results
 
         # Group by calendar date (first 12 chars of "Apr 15, 2026 08:13" → "Apr 15, 2026")
-        _by_date: dict[str, list[str]] = _dd(list)
+        _by_date: dict[str, list[tuple[str, list[str]]]] = _dd(list)
         for _a in _standup_items:
             _date_key = _a["timestamp"].split(" ")[0:3]  # e.g. ["Apr", "15,", "2026"]
             _date_str = " ".join(_date_key)
-            for _b in _bullets_only(_a.get("body") or _a.get("title") or ""):
-                _by_date[_date_str].append(_b)
+            for _item in _bullets_only(_a.get("body") or _a.get("title") or ""):
+                _by_date[_date_str].append(_item)
 
-        # Deduplicate bullets within each day (same message sometimes ingested twice)
+        def _truncate(s: str, n: int = 200) -> str:
+            return s[:n] + ("…" if len(s) > n else "")
+
+        # Deduplicate bullets within each day (same message sometimes ingested
+        # twice).  Dedup key is the (parent, sub-bullets) tuple so that two
+        # answers with the same headline text but different sub-bullets aren't
+        # accidentally collapsed into one.
         lines += ["", "── RECENT STANDUPS ──────────────────"]
-        for _date_str, _bullets in sorted(
+        for _date_str, _answers in sorted(
             _by_date.items(),
             key=lambda kv: kv[0],
             reverse=True,
         ):
-            seen: set[str] = set()
-            unique = [b for b in _bullets if not (b in seen or seen.add(b))]  # type: ignore[func-returns-value]
+            seen: set[tuple[str, tuple[str, ...]]] = set()
             lines.append(f"  {_date_str}")
-            for _b in unique:
-                _truncated = _b[:200] + ("…" if len(_b) > 200 else "")
-                lines.append(f"    • {_truncated}")
+            for _parent, _subs in _answers:
+                _sig = (_parent, tuple(_subs))
+                if _sig in seen:
+                    continue
+                seen.add(_sig)
+                lines.append(f"    • {_truncate(_parent)}")
+                for _sub in _subs:
+                    lines.append(f"      ◦ {_truncate(_sub)}")
 
     lines += ["", "─" * 38]
     return "\n".join(lines)
