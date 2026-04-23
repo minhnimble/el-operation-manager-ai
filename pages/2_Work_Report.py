@@ -101,49 +101,30 @@ def _format_standup_body(text: str) -> str:
 
     text = re.sub(r"(\S) +(\*\S)", lambda m: m.group(1) + "\n\n" + m.group(2), text)
 
-    # Break the inline answer onto its own line, right under the
-    # question header.  Standuply appends a signature emoji (🖖 / 🧑‍🍳
-    # / 🧐) to each question, followed by a label (``JB:`` / ``EL:``)
-    # or a free answer (``All good``) before the first bullet or
-    # end-of-body.  Without this break the answer hugs the emoji on
-    # the same visual line as the question.
-    #
-    # Anchor is *any non-ASCII glyph run excluding bullet glyphs*
-    # (``[^\\x00-\\x7f•◦]…``).  Enumerating specific emoji codepoints
-    # failed because stored payloads carry variation selectors
-    # (``\ufe0f``) and ZWJ sequences that broke literal matches, and
-    # Standuply's emoji set drifts.  Non-ASCII run + bullet exclusion
-    # reliably isolates the question-mark emoji regardless of codepoint.
-    #
-    # Answer start is ``[^\\s\u00a0•]`` — any non-space, non-bullet
-    # char — so a leading ``*bold*`` wrapper (``*All good*``) or a
-    # lowercase sentence still anchors the break.
-    #
-    # Non-greedy ``[^•]*?`` + lookahead ``[\\s\u00a0]*(?:•|$)`` stops
-    # at the first bullet or end-of-body, so a mid-bullet ``: `` never
-    # gets swept in.
-    #
-    # Separator class includes U+00A0: Python's default ``\s`` excludes
-    # NBSP and Slack sometimes emits NBSP between emoji and label.
-    # Non-raw pattern so ``\u00a0`` resolves to the real codepoint.
+    # Standuply question blocks are bold-wrapped (``*...*``).  Put the
+    # answer on a new line right after the closing ``*`` regardless of what
+    # token starts the answer (``CBTL:`` / ``CBTL <> Okya:`` / ``All good``).
+    # This is more stable than emoji-shape matching and prevents the
+    # question + answer from being glued into one visual line.
     text = re.sub(
-        "([^\\x00-\\x7f•◦][^\\s\u00a0\\x00-\\x7f•◦<]*)[\\s\u00a0]+([^\\s\u00a0•][^•]*?)(?=[\\s\u00a0]*(?:•|$))",
+        r"(\*[^*\n]+\*)[\s\u00a0]+([^\s\u00a0•])",
         r"\1<br>\2",
         text,
     )
 
-    # Fallback for question-emoji separators where the answer is plain text
-    # (no leading ``EL:``-style tag).  Handle both unicode emoji and Slack
-    # shortcodes (``:face_with_monocle:``).
+    # Break question-emoji + answer (no leading bullet) onto two lines.
+    # Important: match emoji ranges explicitly (not "any non-ASCII"), so
+    # Vietnamese/other accented text does not get mistaken for an emoji
+    # separator.
     text = re.sub(
-        r"([.\)\!\?][\s\u00a0]+[^\x00-\x7f•◦][^\s\u00a0•◦<]*[\s\u00a0]+)([^\s\u00a0•][^•]*?)(?=[\s\u00a0]*(?:•|$))",
+        "([.\\)\\!\\?][\\s\u00a0]+(?:[\\u2600-\\u27BF\\U0001F300-\\U0001FAFF]|[\\ufe0f\\u200d])+)[\\s\u00a0]+([^\\s\u00a0•][^•]*?)(?=[\\s\u00a0]*(?:•|$))",
         r"\1<br>\2",
         text,
     )
 
     # Same split for shortcode-form emoji (``:...:``) instead of unicode.
     text = re.sub(
-        r"([.\)\!\?][\s\u00a0]+:[A-Za-z0-9_+-]{2,}:[\s\u00a0]+)([^\s\u00a0•][^•]*?)(?=[\s\u00a0]*(?:•|$))",
+        r"([.\)\!\?][\s\u00a0]+:[A-Za-z0-9_+-]{2,}:)[\s\u00a0]+([^\s\u00a0•][^•]*?)(?=[\s\u00a0]*(?:•|$))",
         r"\1<br>\2",
         text,
     )
@@ -176,7 +157,7 @@ def _format_standup_body(text: str) -> str:
     # ``CBTL <> Okya:``.  Requiring one of ``< > & / + -`` avoids matching
     # normal sentence fragments that merely contain a colon.
     text = re.sub(
-        r"(?<=[.\)\!\?])[\s\u00a0]+([A-Z][A-Za-z0-9\s<>&/\+\-]{0,48}[<>&/\+\-][A-Za-z0-9\s<>&/\+\-]{0,48}:)(?=[\s\u00a0])",
+        r"(?<=[.\)\!\?])[\s\u00a0]+([A-Z][A-Za-z0-9\s<>&;/\+\-]{0,48}[<>&/\+\-][A-Za-z0-9\s<>&;/\+\-]{0,48}:)(?=[\s\u00a0])",
         r"<br>\1",
         text,
     )
