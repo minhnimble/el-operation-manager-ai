@@ -129,25 +129,24 @@ st.markdown("---")
 st.markdown("""
 ### What this tool does
 
-- **Tracks your team** — add engineers to your roster; they don't need to sign in
-- **Captures Slack activity** — standups, discussions, and channel messages from every channel you're in
-- **Pulls GitHub activity** — commits, PRs, reviews, and issues via OAuth or a manually set GitHub handle
-- **Batch sync** — sync yourself, your entire team, or any subset of members in one go with per-member progress tracking
-- **Flexible date ranges** — sync any window (last N days or a custom date range); default is 3 months
-- **Background sync** — sync runs in the background so you can freely switch pages without losing progress
-- **Classifies work** using Claude AI — surfaces feature work, bug fixes, architecture, mentorship, and incidents from standup text
-- **Generates shareable reports** — metrics, activity feed, AI insights, and a one-click copy summary per team member
-- **Database cleanup tools** — remove data from ignored channels across all users, or clear stale data for removed team members
-- **Notion Dev Track Sync** — pulls per-developer skill tracks from a Notion database and writes status + objective notes back into the Google Sheet snapshot. Preview the diff (cell updates + Focus Areas add/remove) before applying, per-member or bulk.
-- **Focus Areas intent detection** — a skill earns a Focus Areas bullet iff any unchecked to-do reads as active work (V-ing / `In-progress:` / `In-review:`) or pending focus (`New objective:` / `To-review objective:`). Leading adverbs like `Actively raising…` are handled so the V-ing head still counts.
-- **Toggleable-aware Focus Areas writes** — sync detects whether the Notion `## Focus Areas` heading is toggleable and appends bullets in the correct container, positioning them directly under the heading instead of the page bottom.
-- **All user-facing times shown in GMT+7** — "Last fetched", sync result timestamps, and report generation dates. Database stays UTC; conversion happens only at display.
+- **Team roster** — add engineers; no sign-in needed for them.
+- **Slack ingest** — standups + channel messages from every joined channel.
+- **GitHub ingest** — commits, PRs, reviews, issues (PAT or handle).
+- **Batch + background sync** — self / team / subset, per-member progress, runs off-page.
+- **Flexible date ranges** — last N days or custom window (default 3 months).
+- **Claude AI classification** — features, bugs, architecture, mentorship, incidents.
+- **Shareable reports** — metrics, activity feed, insights, one-click copy.
+- **Cleanup tools** — purge ignored-channel data or stale-member data.
+- **Notion Dev Track Sync** — pulls per-dev skill tracks from Notion → Google Sheet; preview diff (cells + Focus Areas) before apply, per-member or bulk.
+- **Focus Areas detection** — bullet added when any unchecked to-do is V-ing, `In-progress:`, `In-review:`, `New objective:`, or `To-review objective:` (handles adverb+V-ing like `Actively raising…`).
+- **Toggleable-aware writes** — bullets land under the `## Focus Areas` heading, not the page bottom.
+- **GMT+7 display** — all user-facing times in GMT+7; DB stays UTC.
 
 ### Getting started
 
-1. **Connect Accounts** — sign in with Slack (required); optionally link your own GitHub account
-2. **Team Overview** — add your team members; enter their GitHub handles if they haven't connected OAuth
-3. **Sync Data** — select one or more members (or your whole team at once), pick a date range, and kick off a background sync for Slack and/or GitHub
-4. **Work Report** — generate a report for any team member, browse their activity feed, and copy a summary to share
-5. **Notion Dev Track** — fetch the developer track database, preview per-member diffs, and sync skill status + Focus Areas back into the Google Sheet
+1. **Connect Accounts** — Slack sign-in (required); optional GitHub PAT.
+2. **Team Overview** — add members; set GitHub handles.
+3. **Sync Data** — pick members + date range; run Slack/GitHub in background.
+4. **Work Report** — generate per-member report; copy summary.
+5. **Notion Dev Track** — fetch Notion DB, preview diffs, sync to Sheet.
 """)
