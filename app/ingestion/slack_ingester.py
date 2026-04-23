@@ -40,6 +40,25 @@ class CancelledError(RuntimeError):
 
 
 class SlackIngester:
+    # Process-wide cache for name → slack_user_id resolution. Each lookup
+    # costs 4 DB SELECTs; in a standup channel the same bot usernames repeat
+    # many times, so caching saves a lot of round-trips. Keyed by
+    # (team_id, name_lower); value is the resolved uid or None for misses.
+    _NAME_RESOLVE_CACHE: dict[tuple[str, str], str | None] = {}
+
+    # Process-wide cache for channel-name → channel-dict lookups. Standup
+    # channels are stable, and paginating conversations.list is expensive
+    # (Tier 2). Keyed by (team_id, frozenset(lowercased names)).
+    _CHANNEL_LOOKUP_CACHE: dict[tuple[str, frozenset[str]], list[dict]] = {}
+
+    @classmethod
+    def clear_name_cache(cls) -> None:
+        cls._NAME_RESOLVE_CACHE.clear()
+
+    @classmethod
+    def clear_channel_cache(cls) -> None:
+        cls._CHANNEL_LOOKUP_CACHE.clear()
+
     def __init__(self, user_token: str, team_id: str):
         self.team_id = team_id
         # Optional cancel callable, set by backfill_channel so HTTP layer can
@@ -166,6 +185,11 @@ class SlackIngester:
         requested names are found, so it is much cheaper than loading the full
         channel list when you only need a handful of specific channels.
         """
+        cache_key = (self.team_id, frozenset(n.lower() for n in names))
+        cached = self._CHANNEL_LOOKUP_CACHE.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
         remaining = {n.lower() for n in names}
         found: list[dict] = []
 
@@ -194,6 +218,11 @@ class SlackIngester:
                 if not cursor:
                     break
 
+        # Only cache full-match results. Partial misses may resolve later
+        # (e.g. private channel invited mid-session); caching them would
+        # starve the resync.
+        if not remaining:
+            self._CHANNEL_LOOKUP_CACHE[cache_key] = list(found)
         return found
 
     async def is_member(self, channel_id: str, user_id: str) -> bool:
@@ -364,47 +393,58 @@ class SlackIngester:
         if not name_lower:
             return None
 
-        # TeamMember display name
-        result = await db.execute(
-            select(TeamMember.member_slack_user_id).where(
-                TeamMember.member_slack_team_id == self.team_id,
-                func.lower(TeamMember.member_display_name) == name_lower,
-            ).limit(1)
-        )
-        uid = result.scalar_one_or_none()
-        if uid:
-            return uid
+        # Process-wide cache — each unique username resolves once per run,
+        # even across many bot_message occurrences in a standup channel.
+        cache_key = (self.team_id, name_lower)
+        if cache_key in self._NAME_RESOLVE_CACHE:
+            return self._NAME_RESOLVE_CACHE[cache_key]
 
-        # TeamMember real name
-        result = await db.execute(
-            select(TeamMember.member_slack_user_id).where(
-                TeamMember.member_slack_team_id == self.team_id,
-                func.lower(TeamMember.member_real_name) == name_lower,
-            ).limit(1)
-        )
-        uid = result.scalar_one_or_none()
-        if uid:
-            return uid
+        async def _lookup() -> str | None:
+            # TeamMember display name
+            result = await db.execute(
+                select(TeamMember.member_slack_user_id).where(
+                    TeamMember.member_slack_team_id == self.team_id,
+                    func.lower(TeamMember.member_display_name) == name_lower,
+                ).limit(1)
+            )
+            uid = result.scalar_one_or_none()
+            if uid:
+                return uid
 
-        # Signed-in User (display name)
-        result = await db.execute(
-            select(User.slack_user_id).where(
-                User.slack_team_id == self.team_id,
-                func.lower(User.slack_display_name) == name_lower,
-            ).limit(1)
-        )
-        uid = result.scalar_one_or_none()
-        if uid:
-            return uid
+            # TeamMember real name
+            result = await db.execute(
+                select(TeamMember.member_slack_user_id).where(
+                    TeamMember.member_slack_team_id == self.team_id,
+                    func.lower(TeamMember.member_real_name) == name_lower,
+                ).limit(1)
+            )
+            uid = result.scalar_one_or_none()
+            if uid:
+                return uid
 
-        # Signed-in User (real name)
-        result = await db.execute(
-            select(User.slack_user_id).where(
-                User.slack_team_id == self.team_id,
-                func.lower(User.slack_real_name) == name_lower,
-            ).limit(1)
-        )
-        return result.scalar_one_or_none()
+            # Signed-in User (display name)
+            result = await db.execute(
+                select(User.slack_user_id).where(
+                    User.slack_team_id == self.team_id,
+                    func.lower(User.slack_display_name) == name_lower,
+                ).limit(1)
+            )
+            uid = result.scalar_one_or_none()
+            if uid:
+                return uid
+
+            # Signed-in User (real name)
+            result = await db.execute(
+                select(User.slack_user_id).where(
+                    User.slack_team_id == self.team_id,
+                    func.lower(User.slack_real_name) == name_lower,
+                ).limit(1)
+            )
+            return result.scalar_one_or_none()
+
+        uid = await _lookup()
+        self._NAME_RESOLVE_CACHE[cache_key] = uid
+        return uid
 
     # ── Relevance filter ──────────────────────────────────────────────────────
 
@@ -637,10 +677,14 @@ class SlackIngester:
                 nonlocal threads_fetched
                 if cancel_check and cancel_check():
                     return []
-                # Pace thread fetches: 0.4s gap keeps us under Tier 3 (50 req/min)
+                # conversations.replies is Tier 3 (~50 req/min ≈ 0.83/s).
+                # Sleep ~1.2s before every fetch to stay safely under — the
+                # previous 0.4s-per-3 cadence (≈7.5/s) regularly tripped 429s.
                 threads_fetched += 1
-                if threads_fetched % 3 == 0:
-                    await asyncio.sleep(0.4)
+                try:
+                    await self._interruptible_sleep(1.2)
+                except CancelledError:
+                    return []
                 replies = []
                 async for reply in self.iter_thread_replies(channel_id, parent_ts, oldest_ts):
                     if cancel_check and cancel_check():
