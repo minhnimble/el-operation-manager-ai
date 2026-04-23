@@ -435,7 +435,7 @@ st.markdown("---")
 # pass both `value=`/`index=` and have a pre-set session_state value.
 _wr_filter_defaults = {
     "wr_date_preset":  "Last 3 months",
-    "wr_include_ai":   True,
+    "wr_include_ai":   False,
     "wr_custom_start": date.today() - timedelta(days=90),
     "wr_custom_end":   date.today(),
 }
@@ -875,18 +875,28 @@ _pr_merged   = [a for a in github_items if a["type"] == "pr_merged"]
 _pr_reviewed = [a for a in github_items if a["type"] == "pr_review"]
 
 def _render_pr_links(label: str, items: list, icon: str) -> None:
-    with st.expander(f"{icon} {label} ({len(items)})", expanded=len(items) > 0 and len(items) <= 30):
-        if not items:
+    # De-dupe by URL base first — pr_review entries are per-review, collapse
+    # to per-PR. Count the unique PRs so the expander header matches the
+    # rendered list (otherwise "Reviewed (40)" shows 6 rows after dedupe).
+    seen: set[str] = set()
+    unique: list = []
+    for it in sorted(items, key=lambda x: x.get("timestamp") or "", reverse=True):
+        url = it.get("url") or ""
+        key = url.split("#")[0] if url else (it.get("title") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(it)
+
+    with st.expander(
+        f"{icon} {label} ({len(unique)})",
+        expanded=len(unique) > 0 and len(unique) <= 30,
+    ):
+        if not unique:
             st.caption("None in this period.")
             return
-        # de-dupe by URL — pr_review entries are per-review, collapse to per-PR
-        seen: set[str] = set()
-        for it in sorted(items, key=lambda x: x.get("timestamp") or "", reverse=True):
-            url = it.get("url") or ""
-            key = url.split("#")[0] if url else (it.get("title") or "")
-            if key in seen:
-                continue
-            seen.add(key)
+        for it in unique:
+            url   = it.get("url") or ""
             repo  = f"`{it['github_repo']}`" if it.get("github_repo") else ""
             title = it.get("title") or "(no title)"
             ts    = it.get("timestamp", "")
