@@ -1221,11 +1221,17 @@ def _build_share_text(r: "WorkReport") -> str:
         # answers with the same headline text but different sub-bullets aren't
         # accidentally collapsed into one.
         lines += ["", "── RECENT STANDUPS ──────────────────"]
-        for _date_str, _answers in sorted(
+        # Thin separator between day blocks so the eye doesn't merge
+        # consecutive days into one answer list.  Matched in width to the
+        # heading rule above to stay visually consistent inside the <pre>.
+        _DAY_SEP = "  " + ("─" * 34)
+        for _day_idx, (_date_str, _answers) in enumerate(sorted(
             _by_date.items(),
             key=lambda kv: kv[0],
             reverse=True,
-        ):
+        )):
+            if _day_idx > 0:
+                lines.append(_DAY_SEP)
             seen: set[tuple[str, tuple[str, ...]]] = set()
             lines.append(f"  {_date_str}")
             for _parent, _subs in _answers:
