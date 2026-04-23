@@ -117,13 +117,43 @@ def _format_standup_body(text: str) -> str:
     # stop at the *first* bullet (or end-of-body) — not the last —
     # otherwise a stray ``:`` mid-bullet (e.g. ``… on JB Android. EL:``)
     # would be swept in.
-    # NOTE: ``\u200d`` must be interpreted as the literal ZWJ codepoint,
-    # so the pattern is a non-raw f-string — a raw string would keep the
-    # escape as four literal characters and the 🧑‍🍳 alt would never
-    # match the ZWJ-joined glyph in the source.
+    # Break the inline answer onto its own line, right under the
+    # question header.  Standuply reposts each question trailing with
+    # a signature emoji (🖖 / 🧑‍🍳 / 🧐) followed by a label like
+    # ``JB:`` / ``EL:`` or a free answer like ``All good``.  Without
+    # this break the answer hugs the emoji on the same visual line as
+    # the question.
+    #
+    # Earlier attempts enumerated the specific emoji codepoints, but
+    # stored payloads vary: variation selectors (``\ufe0f``) or ZWJ
+    # sequences silently broke a literal match, and Standuply's emoji
+    # set drifts over time.  Instead anchor on *any non-ASCII glyph
+    # run* (``[^\\x00-\\x7f]…``) — emojis are non-ASCII, ordinary
+    # English question text is ASCII, so the first non-ASCII run after
+    # the header is reliably the question-mark emoji.
+    #
+    # Answer run is constrained to ``[A-Z][^•]*?`` (non-greedy, up to
+    # the first bullet) so the break lands on a label/sentence start,
+    # not inside the emoji itself.
+    #
+    # Separator class is ``[\\s\u00a0]`` because Python's default ``\s``
+    # does not include U+00A0 (non-breaking space) and Slack sometimes
+    # emits NBSP between the emoji and the label.  Non-raw pattern so
+    # ``\u00a0`` resolves to the actual NBSP codepoint.
     text = re.sub(
-        "(🖖|🧑\u200d🍳|🧐)\\s+([^•]+?)(?=\\s*(?:•|$))",
+        "([^\\x00-\\x7f•◦][^\\s\u00a0\\x00-\\x7f•◦]*)[\\s\u00a0]+([A-Z][^•]*?)(?=[\\s\u00a0]*(?:•|$))",
         r"\1<br>\2",
+        text,
+    )
+
+    # Also break before a short uppercase-label segment that lives
+    # *inside* a bullet, e.g. ``• … on JB Android. EL:`` where ``EL:``
+    # announces the next project before the next ``•``.  Constrained to
+    # 1–5 uppercase/digit chars + ``:`` so it doesn't chew through
+    # ordinary sentences that happen to contain a colon.
+    text = re.sub(
+        r"[\s\u00a0]+([A-Z][A-Z0-9]{0,4}:)(?=[\s\u00a0]*•)",
+        r"<br>\1",
         text,
     )
 
