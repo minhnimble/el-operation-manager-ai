@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
@@ -15,36 +17,30 @@ settings = get_settings()
 # does the real pooling on its side.
 #
 # Using NullPool means SQLAlchemy opens a fresh asyncpg connection for every
-# AsyncSessionLocal() context and closes it immediately on exit.  This has
-# several advantages over a conventional pool in this environment:
+# AsyncSessionLocal() context and closes it immediately on exit.  This avoids
+# stale connections (PgBouncer aggressively drops idle backends) and cross-
+# event-loop reuse issues (Streamlit reruns pages in different asyncio tasks).
 #
-#   • No stale connections — PgBouncer aggressively drops idle server-side
-#     connections; a SQLAlchemy pool would hand out those dead connections
-#     and produce InterfaceError on the first query.
-#
-#   • No DuplicatePreparedStatementError — named server-side prepared
-#     statements only conflict when the same physical server connection is
-#     reused by different clients.  With NullPool every session gets a brand-
-#     new connection, so there is nothing to conflict with.
-#
-#   • No cross-event-loop issues — Streamlit reruns pages in the same process
-#     but different asyncio tasks; pooled asyncpg connections are tied to the
-#     loop that created them and can raise errors when reused across tasks.
-#
-# statement_cache_size=0 is kept as a belt-and-suspenders measure: it tells
-# asyncpg not to maintain its own client-side prepared-statement LRU cache,
-# so even if a connection is somehow reused it will not attempt to reuse a
-# cached handle that no longer exists on the server.
-# Under Supabase's Transaction Pooler (PgBouncer, pool_mode=transaction), the
-# pooler reuses backend connections across clients, so server-side prepared
-# statement names like "asyncpg_stmt_4" can collide and raise
+# ── PgBouncer + prepared statements ──────────────────────────────────────────
+# Even with NullPool on the client side, Supabase's Transaction Pooler reuses
+# *server-side* backend connections across unrelated clients.  That means two
+# SQLAlchemy sessions on different asyncpg connections can still land on the
+# same Postgres backend, where they try to PREPARE statements with the same
+# auto-generated name ("__asyncpg_stmt_9__" etc.) and raise
 # DuplicatePreparedStatementError.
+#
+# Three settings together make this safe:
 #
 #   • statement_cache_size=0 (asyncpg connect_arg) — disables asyncpg's own
 #     client-side prepared-statement LRU cache.
 #   • prepared_statement_cache_size=0 (URL query param on the asyncpg dialect)
-#     — disables SQLAlchemy's asyncpg-dialect prepared-statement cache. It
-#     must be on the URL; passing it as an engine kwarg raises TypeError.
+#     — disables SQLAlchemy's asyncpg-dialect prepared-statement cache.  Must
+#     be on the URL; passing it as an engine kwarg raises TypeError.
+#   • prepared_statement_name_func — generates a UUID-based statement name
+#     per PREPARE, so names from different client connections can never
+#     collide on a shared PgBouncer backend.  Required for Supabase's
+#     Transaction Pooler; see the SQLAlchemy asyncpg docs under
+#     "Prepared Statement Name with PGBouncer".
 _db_url = make_url(settings.database_url).update_query_dict(
     {"prepared_statement_cache_size": "0"}, append=True
 )
@@ -53,7 +49,10 @@ engine = create_async_engine(
     _db_url,
     poolclass=NullPool,
     echo=not settings.is_production,
-    connect_args={"statement_cache_size": 0},
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4()}__",
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(
