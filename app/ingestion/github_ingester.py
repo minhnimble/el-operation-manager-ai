@@ -250,6 +250,7 @@ class GitHubIngester:
         """Ingest activity for a single repo. Returns counts by type."""
         counts: dict[str, int] = {"commits": 0, "prs": 0, "reviews": 0, "issues": 0}
         repo_name = repo["full_name"]
+        login_lower = (self.github_login or "").lower()
 
         # Commits
         try:
@@ -274,11 +275,12 @@ class GitHubIngester:
         except Exception as e:
             logger.warning("Failed commits for %s: %s", repo_name, _fmt_err(e))
 
-        # Pull Requests + Reviews
+        # Pull Requests authored by this user (+ reviews on their own PRs)
         try:
             prs = await self.get_pull_requests(repo_name)
             for pr in prs:
-                if pr["user"]["login"] != self.github_login:
+                # Case-insensitive: GitHub preserves login case; stored value may not.
+                if ((pr.get("user") or {}).get("login") or "").lower() != login_lower:
                     continue
                 if since and datetime.fromisoformat(
                     pr["created_at"].replace("Z", "+00:00")
@@ -312,7 +314,7 @@ class GitHubIngester:
 
                 reviews = await self.get_pr_reviews(repo_name, pr["number"])
                 for review in reviews:
-                    if review["user"]["login"] != self.github_login:
+                    if ((review.get("user") or {}).get("login") or "").lower() != login_lower:
                         continue
                     review_key = f"{pr['number']}-{review['id']}"
                     await self._upsert_activity(
@@ -340,6 +342,66 @@ class GitHubIngester:
         except Exception as e:
             logger.warning("Failed PRs for %s: %s", repo_name, _fmt_err(e))
 
+        # Reviews on PRs authored by OTHERS (not covered by the authored-PR
+        # loop above). Scoped Search query keeps this cheap — one call per
+        # repo — and mirrors overview mode's logic.
+        try:
+            s_date = since.date().isoformat() if since else "1970-01-01"
+            u_date = datetime.utcnow().date().isoformat()
+            reviewed_prs = await self._search_issues(
+                f"is:pr repo:{repo_name} "
+                f"reviewed-by:{self.github_login} "
+                f"-author:{self.github_login} "
+                f"updated:{s_date}..{u_date}"
+            )
+            for pr in reviewed_prs:
+                pr_number = pr.get("number")
+                if not pr_number:
+                    continue
+                try:
+                    reviews = await self.get_pr_reviews(repo_name, pr_number)
+                except Exception as e:
+                    logger.warning(
+                        "get_pr_reviews failed %s#%s: %s",
+                        repo_name, pr_number, _fmt_err(e),
+                    )
+                    continue
+                for review in reviews:
+                    if ((review.get("user") or {}).get("login") or "").lower() != login_lower:
+                        continue
+                    submitted = review.get("submitted_at")
+                    if submitted:
+                        sub_dt = datetime.fromisoformat(
+                            submitted.replace("Z", "+00:00")
+                        ).replace(tzinfo=None)
+                        if since and sub_dt < since:
+                            continue
+                    else:
+                        sub_dt = datetime.utcnow()
+                    review_key = f"{pr_number}-{review['id']}"
+                    await self._upsert_activity(
+                        db,
+                        slack_team_id=slack_team_id,
+                        slack_user_id=slack_user_id,
+                        activity_type="pr_review",
+                        repo_full_name=repo_name,
+                        ref_id=review_key,
+                        title=f"Review on PR #{pr_number}: {(pr.get('title') or '')[:400]}",
+                        url=review.get("html_url") or pr.get("html_url"),
+                        raw_payload={
+                            "pr_number": pr_number,
+                            "state": review.get("state"),
+                            "submitted_at": submitted,
+                            "via": "search",
+                        },
+                        activity_at=sub_dt,
+                    )
+                    counts["reviews"] += 1
+        except Exception as e:
+            logger.warning(
+                "Failed reviewed-PR scan for %s: %s", repo_name, _fmt_err(e),
+            )
+
         return counts
 
     async def ingest_user_activity(
@@ -353,6 +415,7 @@ class GitHubIngester:
         counts: dict[str, int] = {
             "commits": 0, "prs": 0, "reviews": 0, "issues": 0
         }
+        login_lower = (self.github_login or "").lower()
 
         repos = await self.get_repos()
 
@@ -382,11 +445,11 @@ class GitHubIngester:
             except Exception as e:
                 logger.warning("Failed commits for %s: %s", repo_name, _fmt_err(e))
 
-            # Pull Requests
+            # Pull Requests authored by this user (+ reviews on their own PRs)
             try:
                 prs = await self.get_pull_requests(repo_name)
                 for pr in prs:
-                    if pr["user"]["login"] != self.github_login:
+                    if ((pr.get("user") or {}).get("login") or "").lower() != login_lower:
                         continue
                     if since and datetime.fromisoformat(
                         pr["created_at"].replace("Z", "+00:00")
@@ -418,10 +481,10 @@ class GitHubIngester:
                     )
                     counts["prs"] += 1
 
-                    # Reviews given by this user on other PRs
+                    # Reviews given by this user on their own PRs
                     reviews = await self.get_pr_reviews(repo_name, pr["number"])
                     for review in reviews:
-                        if review["user"]["login"] != self.github_login:
+                        if ((review.get("user") or {}).get("login") or "").lower() != login_lower:
                             continue
                         review_key = f"{pr['number']}-{review['id']}"
                         await self._upsert_activity(
@@ -448,6 +511,65 @@ class GitHubIngester:
 
             except Exception as e:
                 logger.warning("Failed PRs for %s: %s", repo_name, _fmt_err(e))
+
+            # Reviews on PRs authored by OTHERS — see ingest_single_repo for
+            # rationale. Same scoped Search query per repo.
+            try:
+                s_date = since.date().isoformat() if since else "1970-01-01"
+                u_date = datetime.utcnow().date().isoformat()
+                reviewed_prs = await self._search_issues(
+                    f"is:pr repo:{repo_name} "
+                    f"reviewed-by:{self.github_login} "
+                    f"-author:{self.github_login} "
+                    f"updated:{s_date}..{u_date}"
+                )
+                for pr in reviewed_prs:
+                    pr_number = pr.get("number")
+                    if not pr_number:
+                        continue
+                    try:
+                        reviews = await self.get_pr_reviews(repo_name, pr_number)
+                    except Exception as e:
+                        logger.warning(
+                            "get_pr_reviews failed %s#%s: %s",
+                            repo_name, pr_number, _fmt_err(e),
+                        )
+                        continue
+                    for review in reviews:
+                        if ((review.get("user") or {}).get("login") or "").lower() != login_lower:
+                            continue
+                        submitted = review.get("submitted_at")
+                        if submitted:
+                            sub_dt = datetime.fromisoformat(
+                                submitted.replace("Z", "+00:00")
+                            ).replace(tzinfo=None)
+                            if since and sub_dt < since:
+                                continue
+                        else:
+                            sub_dt = datetime.utcnow()
+                        review_key = f"{pr_number}-{review['id']}"
+                        await self._upsert_activity(
+                            db,
+                            slack_team_id=slack_team_id,
+                            slack_user_id=slack_user_id,
+                            activity_type="pr_review",
+                            repo_full_name=repo_name,
+                            ref_id=review_key,
+                            title=f"Review on PR #{pr_number}: {(pr.get('title') or '')[:400]}",
+                            url=review.get("html_url") or pr.get("html_url"),
+                            raw_payload={
+                                "pr_number": pr_number,
+                                "state": review.get("state"),
+                                "submitted_at": submitted,
+                                "via": "search",
+                            },
+                            activity_at=sub_dt,
+                        )
+                        counts["reviews"] += 1
+            except Exception as e:
+                logger.warning(
+                    "Failed reviewed-PR scan for %s: %s", repo_name, _fmt_err(e),
+                )
 
         logger.info(
             "GitHub ingestion complete for %s: %s", self.github_login, counts
