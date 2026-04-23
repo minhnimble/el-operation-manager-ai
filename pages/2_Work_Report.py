@@ -127,15 +127,21 @@ def _format_standup_body(text: str) -> str:
     # NBSP and Slack sometimes emits NBSP between emoji and label.
     # Non-raw pattern so ``\u00a0`` resolves to the real codepoint.
     text = re.sub(
-        "([^\\x00-\\x7f•◦][^\\s\u00a0\\x00-\\x7f•◦]*)[\\s\u00a0]+([^\\s\u00a0•][^•]*?)(?=[\\s\u00a0]*(?:•|$))",
+        "([^\\x00-\\x7f•◦][^\\s\u00a0\\x00-\\x7f•◦<]*)[\\s\u00a0]+([^\\s\u00a0•][^•]*?)(?=[\\s\u00a0]*(?:•|$))",
         r"\1<br>\2",
         text,
     )
 
-    # Fallback for emoji separators encoded as Slack shortcodes (e.g.
-    # ``:face_with_monocle:``) instead of unicode glyphs.  We still split
-    # only where a sentence-ending punctuation + shortcode introduces the
-    # trailing free-text answer, and stop at the first bullet or end.
+    # Fallback for question-emoji separators where the answer is plain text
+    # (no leading ``EL:``-style tag).  Handle both unicode emoji and Slack
+    # shortcodes (``:face_with_monocle:``).
+    text = re.sub(
+        r"([.\)\!\?][\s\u00a0]+[^\x00-\x7f•◦][^\s\u00a0•◦<]*[\s\u00a0]+)([^\s\u00a0•][^•]*?)(?=[\s\u00a0]*(?:•|$))",
+        r"\1<br>\2",
+        text,
+    )
+
+    # Same split for shortcode-form emoji (``:...:``) instead of unicode.
     text = re.sub(
         r"([.\)\!\?][\s\u00a0]+:[A-Za-z0-9_+-]{2,}:[\s\u00a0]+)([^\s\u00a0•][^•]*?)(?=[\s\u00a0]*(?:•|$))",
         r"\1<br>\2",
@@ -162,6 +168,15 @@ def _format_standup_body(text: str) -> str:
     # mistaken for a project-label break.
     text = re.sub(
         r"(?<=[.\)\!\?])[\s\u00a0]+([A-Z][A-Za-z0-9]{0,9}:)(?=[\s\u00a0])",
+        r"<br>\1",
+        text,
+    )
+
+    # Compound label variant with special chars before the colon, e.g.
+    # ``CBTL <> Okya:``.  Requiring one of ``< > & / + -`` avoids matching
+    # normal sentence fragments that merely contain a colon.
+    text = re.sub(
+        r"(?<=[.\)\!\?])[\s\u00a0]+([A-Z][A-Za-z0-9\s<>&/\+\-]{0,48}[<>&/\+\-][A-Za-z0-9\s<>&/\+\-]{0,48}:)(?=[\s\u00a0])",
         r"<br>\1",
         text,
     )
