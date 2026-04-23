@@ -241,8 +241,9 @@ async def build_work_report(
                 or wu.slack_channel_id
                 or ""
             ),
-            # 24-hour clock, GMT+7 — users read reports in local time.
-            "timestamp": to_gmt7(wu.timestamp).strftime("%b %d, %Y %H:%M"),
+            # GMT+7 with AM/PM suffix — 24h format was being misread as 12h
+            # without meridiem, so make the period explicit.
+            "timestamp": to_gmt7(wu.timestamp).strftime("%b %d, %Y %I:%M %p"),
             # Keep the raw datetime alongside the pre-formatted display string.
             # The page-level sorting in PR expanders needs chronological order,
             # and sorting "%b %d, %Y %H:%M" strings orders months alphabetically

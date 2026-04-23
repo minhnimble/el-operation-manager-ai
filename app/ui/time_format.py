@@ -27,14 +27,17 @@ def to_gmt7(dt: datetime) -> datetime:
     return dt.astimezone(GMT7)
 
 
-def format_gmt7(dt: datetime, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
-    """Format ``dt`` in GMT+7 with a trailing ``GMT+7`` label."""
+def format_gmt7(dt: datetime, fmt: str = "%Y-%m-%d %I:%M:%S %p") -> str:
+    """Format ``dt`` in GMT+7 with a trailing ``GMT+7`` label.
+
+    Default format uses 12h + AM/PM suffix — bare 24h was being misread.
+    """
     return to_gmt7(dt).strftime(fmt) + " GMT+7"
 
 
 def format_gmt7_time(dt: datetime) -> str:
-    """Short ``HH:MM:SS GMT+7`` — for compact table cells."""
-    return to_gmt7(dt).strftime("%H:%M:%S") + " GMT+7"
+    """Short ``HH:MM:SS AM/PM GMT+7`` — for compact table cells."""
+    return to_gmt7(dt).strftime("%I:%M:%S %p") + " GMT+7"
 
 
 def now_gmt7() -> datetime:
