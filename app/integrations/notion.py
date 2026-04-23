@@ -348,21 +348,22 @@ async def _find_focus_areas_container(
 ) -> str:
     """Return the block_id to append Focus Areas items under.
 
-    If the heading is toggleable (has inline children), returns its block_id.
-    Otherwise we need a different strategy — appending to the page itself
-    would put the item at the very bottom, so we insert *after* the last
-    existing Focus Areas child (or after the heading itself).
+    Notion's API only accepts ``blocks.children.append`` on blocks that
+    actually support children. A *toggleable* heading does — a plain
+    heading_2 does NOT, and appending to it raises
+    ``APIResponseError: Block does not support children``.
 
-    For simplicity and to guarantee placement under the heading, we append
-    to the heading block's children. This works when the heading is
-    toggleable in Notion; if it's not, the API still accepts appending
-    children (Notion will render it as a nested block).
+    Heuristic: if the parsed heading already has inline children, it's
+    toggleable → append under it. Otherwise fall back to the page itself
+    (the bullet lands at the page bottom; better than failing the whole
+    sync). The caller has already verified the heading exists.
     """
     for b in blocks:
         if b.type == "heading_2" and b.text.strip().lower() == "focus areas":
-            return b.block_id
-    # No Focus Areas heading — fall back to the page itself; the caller is
-    # expected to ensure the heading exists before calling.
+            if b.children:
+                return b.block_id
+            # Plain (non-toggleable) heading — append to the page instead.
+            return page_id
     return page_id
 
 
