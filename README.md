@@ -314,16 +314,16 @@ The ingester handles two patterns:
 
 ## Local Development
 
-> **Note:** Slack OAuth rejects plain `http://` redirect URLs. For local development you must run Streamlit with HTTPS using local TLS certs.
+> **Note:** Slack OAuth rejects plain `http://` redirect URLs. Run Streamlit over HTTPS locally using self-signed certs.
 
-### 1. Clone and install
+### 1. Clone + install
 
 ```bash
 git clone <repo-url>
 cd el-operation-manager-ai
 python3 -m venv .venv
 source .venv/bin/activate
-pip3 install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 2. Configure `.env`
@@ -332,33 +332,37 @@ pip3 install -r requirements.txt
 cp .env.example .env
 ```
 
-Fill in the required values:
+Required keys:
 
 ```env
-APP_SECRET_KEY=<random string — run: python -c "import secrets; print(secrets.token_hex(32))">
+APP_SECRET_KEY=<run: python -c "import secrets; print(secrets.token_hex(32))">
 APP_BASE_URL=https://localhost:8501
+
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/el_ops
 
 SLACK_CLIENT_ID=...
 SLACK_CLIENT_SECRET=...
 
-# GitHub PAT — required. Required scopes: repo + read:org.
-GITHUB_PAT=ghp_...
-
+GITHUB_PAT=ghp_...          # repo + read:org. Never stored in DB.
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-`APP_SECRET_KEY` signs the session cookie that persists your Slack login across page refreshes and OAuth redirects. Any non-empty value works locally; just keep it stable (don't regenerate on every run) or your session will reset each time you restart the app.
+Optional (enable their features): `GOOGLE_SHEETS_CREDENTIALS_JSON` + `DEV_TRACK_SHEET_ID` (Developer Track), `NOTION_API_KEY` + `NOTION_DEV_TRACK_DATABASE_ID` (+ optional `NOTION_DEV_TRACK_VIEW_ID`).
+
+`APP_SECRET_KEY` signs the session cookie — keep it stable across restarts or your Slack session resets every reload.
 
 > Config source priority: `st.secrets` (if present) → `.env` file.
 
-### 3. Start the database and run migrations
+### 3. Start PostgreSQL + run migrations
 
 ```bash
-make up       # starts PostgreSQL via Docker Compose
-make migrate  # runs Alembic migrations
+make up       # docker compose up -d db redis   (Redis is defined but unused by the Streamlit UI)
+make migrate  # alembic upgrade head
 ```
 
-### 4. Set up local HTTPS certs
+Syncs run in daemon threads inside the Streamlit process — no Celery worker / Redis needed at runtime. The `worker` / `beat` / `api` Makefile targets exist for legacy paths and are not required for normal use.
+
+### 4. Generate local HTTPS certs
 
 ```bash
 ./scripts/setup_local_https.sh
@@ -376,7 +380,7 @@ streamlit run streamlit_app.py \
   --server.sslKeyFile .certs/localhost-key.pem
 ```
 
-Set the Slack OAuth redirect URL to `https://localhost:8501`. GitHub needs no redirect — the `GITHUB_PAT` env var is used directly.
+Set the Slack OAuth redirect URL to `https://localhost:8501`. GitHub needs no redirect — the `GITHUB_PAT` env var is read directly at sync time.
 
 ---
 
