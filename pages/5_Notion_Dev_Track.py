@@ -453,7 +453,15 @@ if sync_one:
         with st.status(
             f"Syncing {selected_plan.dev_name}…", expanded=True
         ) as status:
-            status.write("📝 Writing changes to Google Sheet…")
+            if selected_plan.updates and (
+                selected_plan.focus_areas_to_add or selected_plan.focus_areas_to_remove
+            ):
+                _phase_label = "📝 Writing changes to Google Sheet + Notion…"
+            elif selected_plan.updates:
+                _phase_label = "📝 Writing changes to Google Sheet…"
+            else:
+                _phase_label = "📝 Updating Notion Focus Areas…"
+            status.write(_phase_label)
             result = _run_async(
                 apply_sync_plan(settings.dev_track_sheet_id, selected_plan)
             )

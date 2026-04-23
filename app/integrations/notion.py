@@ -47,6 +47,7 @@ class NotionBlock:
     type: str
     text: str
     checked: bool | None = None
+    is_toggleable: bool | None = None
     children: list["NotionBlock"] = field(default_factory=list)
 
 
@@ -260,6 +261,13 @@ def _extract_checked(raw: dict[str, Any]) -> bool | None:
     return bool((raw.get("to_do") or {}).get("checked", False))
 
 
+def _extract_is_toggleable(raw: dict[str, Any]) -> bool | None:
+    btype = raw.get("type") or ""
+    if not btype.startswith("heading_"):
+        return None
+    return bool((raw.get(btype) or {}).get("is_toggleable", False))
+
+
 async def _fetch_subtree(raw: dict[str, Any]) -> NotionBlock:
     """Convert one raw block (and all descendants) into a NotionBlock tree."""
     block = NotionBlock(
@@ -267,6 +275,7 @@ async def _fetch_subtree(raw: dict[str, Any]) -> NotionBlock:
         type=raw.get("type", ""),
         text=_extract_block_text(raw),
         checked=_extract_checked(raw),
+        is_toggleable=_extract_is_toggleable(raw),
     )
     if raw.get("has_children"):
         raw_children = await _list_children(block.block_id)
@@ -342,29 +351,48 @@ def strip_focus_terminator(text: str) -> str:
 _normalize_skill_text = normalize_skill_text
 
 
-async def _find_focus_areas_container(
+def _resolve_focus_areas_append_target(
     page_id: str,
     blocks: list[NotionBlock],
-) -> str:
-    """Return the block_id to append Focus Areas items under.
+) -> tuple[str, str | None]:
+    """Resolve (container_id, after_block_id) for a Focus Areas append.
 
-    Notion's API only accepts ``blocks.children.append`` on blocks that
-    actually support children. A *toggleable* heading does — a plain
-    heading_2 does NOT, and appending to it raises
-    ``APIResponseError: Block does not support children``.
+    Notion's ``blocks.children.append`` only works on blocks that support
+    children. A *toggleable* heading_2 does; a plain heading_2 does NOT
+    (raises ``APIResponseError: Block does not support children``). We
+    rely on the explicit ``is_toggleable`` flag from the Notion API
+    rather than inferring it from child presence, since a plain heading
+    can still appear to have children via stale parse state.
 
-    Heuristic: if the parsed heading already has inline children, it's
-    toggleable → append under it. Otherwise fall back to the page itself
-    (the bullet lands at the page bottom; better than failing the whole
-    sync). The caller has already verified the heading exists.
+    * Toggleable heading → append under the heading itself; ``after``
+      is the last existing child (so new bullets land at the bottom of
+      the section rather than the top).
+    * Plain heading → append at page level, ``after`` the last sibling
+      that belongs to the Focus Areas section (the heading itself, or
+      its last non-heading sibling before the next heading_2). This
+      places the bullet right under Focus Areas instead of the page
+      bottom.
     """
-    for b in blocks:
+    focus_block: NotionBlock | None = None
+    focus_index: int | None = None
+    for i, b in enumerate(blocks):
         if b.type == "heading_2" and b.text.strip().lower() == "focus areas":
-            if b.children:
-                return b.block_id
-            # Plain (non-toggleable) heading — append to the page instead.
-            return page_id
-    return page_id
+            focus_block = b
+            focus_index = i
+            break
+    if focus_block is None:
+        return page_id, None
+
+    if focus_block.is_toggleable:
+        after = focus_block.children[-1].block_id if focus_block.children else None
+        return focus_block.block_id, after
+
+    last_sibling_id = focus_block.block_id
+    for b in blocks[(focus_index or 0) + 1:]:
+        if b.type == "heading_2":
+            break
+        last_sibling_id = b.block_id
+    return page_id, last_sibling_id
 
 
 async def add_skill_to_focus_areas(
@@ -402,12 +430,12 @@ async def add_skill_to_focus_areas(
     if not has_heading:
         return False
 
-    container_id = await _find_focus_areas_container(page_id, blocks)
+    container_id, after_id = _resolve_focus_areas_append_target(page_id, blocks)
 
     client = _client()
-    await client.blocks.children.append(
-        block_id=container_id,
-        children=[{
+    append_kwargs: dict[str, Any] = {
+        "block_id": container_id,
+        "children": [{
             "object": "block",
             "type": "bulleted_list_item",
             "bulleted_list_item": {
@@ -416,7 +444,10 @@ async def add_skill_to_focus_areas(
                 ]
             },
         }],
-    )
+    }
+    if after_id:
+        append_kwargs["after"] = after_id
+    await client.blocks.children.append(**append_kwargs)
     return True
 
 
