@@ -332,6 +332,37 @@ async def _get_standup_channels(access_token: str, team_id: str) -> list[dict]:
         await ingester.close()
 
 
+async def _count_standup_msgs(
+    team_id: str,
+    user_ids: list[str],
+    channel_ids: list[str],
+    oldest: "datetime",
+    latest: "datetime | None",
+) -> dict[str, int]:
+    """Return {slack_user_id: message_count} for the given window + channels.
+
+    Used to derive per-member deltas around the single-pass standup sync —
+    no Slack API, pure DB scan.
+    """
+    if not user_ids or not channel_ids:
+        return {}
+    async with AsyncSessionLocal() as db:
+        stmt = (
+            select(SlackMessage.slack_user_id, func.count(SlackMessage.id))
+            .where(
+                SlackMessage.slack_team_id == team_id,
+                SlackMessage.slack_user_id.in_(user_ids),
+                SlackMessage.channel_id.in_(channel_ids),
+                SlackMessage.timestamp >= oldest,
+            )
+        )
+        if latest is not None:
+            stmt = stmt.where(SlackMessage.timestamp <= latest)
+        stmt = stmt.group_by(SlackMessage.slack_user_id)
+        result = await db.execute(stmt)
+        return {uid: int(cnt) for uid, cnt in result.all()}
+
+
 async def _normalize_slack(team_id: str) -> int:
     async with AsyncSessionLocal() as db:
         count = await normalize_slack_messages(db, team_id=team_id)
@@ -815,6 +846,74 @@ def _run_slack_sync_bg(
                 job["summary"] = f"❌ Failed: {e}"
                 return
 
+        # ── Standup mode: single-pass history walk across ALL members ──────
+        # Big perf win over the old N-member × full-history traversal:
+        # we crawl each standup channel exactly once with filter_user_id=None,
+        # letting backfill_channel resolve each message to its real owner via
+        # the name-resolution cache. Per-member counts then come from a DB
+        # diff (pre/post) — no API calls inside the per-member loop.
+        standup_pre_counts: dict[str, int] = {}
+        standup_post_counts: dict[str, int] = {}
+        standup_errors: list[str] = []
+        standup_unresolved: list[str] = []
+        standup_channels: list[dict] = []
+        if slack_sync_mode == "standup":
+            _jlog(job, "📋 Resolving standup channel(s)…")
+            try:
+                standup_channels = _run(_get_standup_channels(access_token, slack_team_id))
+            except Exception as e:
+                _jlog(job, f"❌ Failed to load standup channels: {e}", "error")
+                job["summary"] = f"❌ Failed: {e}"
+                return
+            standup_channels = [
+                c for c in standup_channels
+                if (allowed_names is None) or c.get("name", "").lower() in allowed_names
+            ]
+            _jlog(job, f"→ {len(standup_channels)} channel(s).")
+
+            target_uids = [u for _, u in target_users]
+            standup_channel_ids = [c["id"] for c in standup_channels]
+            standup_pre_counts = _run(_count_standup_msgs(
+                slack_team_id, target_uids, standup_channel_ids, oldest, latest,
+            ))
+
+            _jlog(job, "🔁 Walking standup history once for all members…")
+            for ch_idx, ch in enumerate(standup_channels):
+                if job.get("stop_requested") or not _slack_gen_alive(my_gen):
+                    _jlog(job, "🛑 Stopped before channel walk completed.", "warn")
+                    break
+                ch_id   = ch["id"]
+                ch_name = ch.get("name", ch_id)
+                job["progress"] = int((ch_idx / max(len(standup_channels), 1)) * 60)
+                job["progress_text"] = (
+                    f"#{ch_name} ({ch_idx + 1}/{len(standup_channels)}) — "
+                    f"single-pass for {len(target_users)} member(s)…"
+                )
+                _jlog(job, f"  📥 #{ch_name}")
+                count, err, unresolved = _run(_sync_slack_channel(
+                    access_token, slack_team_id, slack_user_id,
+                    ch_id, ch_name, oldest, latest=latest,
+                    filter_user_id=None,
+                    cancel_check=_cancel,
+                ))
+                if err:
+                    standup_errors.append(f"#{ch_name}: {err}")
+                    _jlog(job, f"    ⚠️ {err}", "warn")
+                else:
+                    _jlog(job, f"    ✓ {count} new message(s)")
+                for u in unresolved:
+                    if u not in standup_unresolved:
+                        standup_unresolved.append(u)
+            if standup_unresolved:
+                _jlog(
+                    job,
+                    f"  ⚠️ Unmatched standup usernames: {', '.join(standup_unresolved)}",
+                    "warn",
+                )
+            standup_post_counts = _run(_count_standup_msgs(
+                slack_team_id, target_uids, standup_channel_ids, oldest, latest,
+            ))
+
         total_members = len(target_users)
         stopped = False
         for idx, (member_name, target_user_id) in enumerate(target_users):
@@ -827,47 +926,42 @@ def _run_slack_sync_bg(
                 break
 
             is_self_m = target_user_id == slack_user_id
-            job["progress"] = int(idx / total_members * 94)
+            job["progress"] = int(60 + (idx / total_members) * 34) if slack_sync_mode == "standup" \
+                else int(idx / total_members * 94)
             job["progress_text"] = f"Member {idx + 1}/{total_members}: {member_name}…"
 
             ms: dict = {"name": member_name, "status": "⏳", "detail": ""}
             job["member_statuses"].append(ms)
-            _jlog(job, f"\n👤 **{member_name}**")
 
             total_msgs = 0
             member_errors: list[str] = []
 
-            try:
-                if slack_sync_mode == "standup":
-                    _jlog(job, "  📋 Looking up standup channel(s)…")
-                    channels = _run(_get_standup_channels(access_token, slack_team_id))
-                    _jlog(job, f"  → {len(channels)} channel(s).")
-                else:
-                    if is_self_m:
-                        channels = base_channels
-                        _jlog(job, f"  Using {len(channels)} channel(s).")
-                    else:
-                        _jlog(job, f"  Filtering channels for {member_name}…")
-                        channels = _run(_filter_channels_by_member(
-                            access_token, slack_team_id, base_channels, target_user_id
-                        ))
-                        _jlog(job, f"  → {len(channels)} channel(s).")
+            # Standup mode: all API work already done in the single-pass
+            # channel walk above. Per-member status is just a DB diff.
+            if slack_sync_mode == "standup":
+                delta = (
+                    standup_post_counts.get(target_user_id, 0)
+                    - standup_pre_counts.get(target_user_id, 0)
+                )
+                total_msgs = delta
+                grand_msgs += delta
+                ms["status"] = "✅" if not standup_errors else "⚠️"
+                ms["detail"] = f"{total_msgs} msgs"
+                _jlog(job, f"👤 **{member_name}** — {total_msgs} new msg(s)")
+                continue
 
-                # Hard guard: in standup mode, drop anything that isn't on the
-                # allowlist. Defends against API quirks or stale code paths.
-                if allowed_names is not None:
-                    before = len(channels)
-                    channels = [
-                        c for c in channels
-                        if c.get("name", "").lower() in allowed_names
-                    ]
-                    if len(channels) != before:
-                        _jlog(
-                            job,
-                            f"  ⛔ Dropped {before - len(channels)} non-standup "
-                            f"channel(s) — standup mode allowlist enforced.",
-                            "warn",
-                        )
+            _jlog(job, f"\n👤 **{member_name}**")
+
+            try:
+                if is_self_m:
+                    channels = base_channels
+                    _jlog(job, f"  Using {len(channels)} channel(s).")
+                else:
+                    _jlog(job, f"  Filtering channels for {member_name}…")
+                    channels = _run(_filter_channels_by_member(
+                        access_token, slack_team_id, base_channels, target_user_id
+                    ))
+                    _jlog(job, f"  → {len(channels)} channel(s).")
 
                 n_ch = max(len(channels), 1)
                 for ch_idx, ch in enumerate(channels):
@@ -879,13 +973,6 @@ def _run_slack_sync_bg(
                         stopped = True
                         break
 
-                    # Defense in depth: re-check the allowlist on each channel
-                    # so an in-flight loop can't slip a non-standup channel
-                    # through even if the list above was somehow mutated.
-                    if allowed_names is not None and ch.get("name", "").lower() not in allowed_names:
-                        _jlog(job, f"  ⛔ Skipping #{ch.get('name')} — not in standup allowlist.", "warn")
-                        continue
-
                     ch_id   = ch["id"]
                     ch_name = ch.get("name", ch_id)
                     # Per-channel progress: interpolate within this member's slice
@@ -896,14 +983,10 @@ def _run_slack_sync_bg(
                         f"#{ch_name} ({ch_idx + 1}/{len(channels)})"
                     )
                     _jlog(job, f"  📥 #{ch_name}")
-                    # In standup mode, always pass the target user as the filter — even
-                    # for self — so backfill_channel can use its `target_names`
-                    # optimization and skip resolving every other team member's bot
-                    # username (chuu, tung nguyen, vo minh don, …) inside the channel.
-                    if slack_sync_mode == "standup":
-                        mf = target_user_id
-                    else:
-                        mf = None if is_self_m else target_user_id
+                    # Normal mode only reaches here; standup mode short-circuits
+                    # above. Self-sync stores all messages (filter None) so
+                    # mentions from others land on the EM's own feed too.
+                    mf = None if is_self_m else target_user_id
                     count, err, unresolved = _run(_sync_slack_channel(
                         access_token, slack_team_id, slack_user_id,
                         ch_id, ch_name, oldest, latest=latest,
