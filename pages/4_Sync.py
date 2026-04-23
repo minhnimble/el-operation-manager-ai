@@ -1308,10 +1308,16 @@ def _render_job_ui(job: dict, state_key: str) -> None:
             job["stop_requested"] = True
     else:
         summary = job.get("summary", "")
+        # Separate if/elif branches — not a ternary expression statement.
+        # Streamlit magic-write treats bare expressions as `st.write(expr)`,
+        # and `st.warning(...)` returns a DeltaGenerator → st.write falls
+        # through to `_repr_html_` and raises StreamlitAPIException.
         if "✅" in summary:
             st.success(summary)
+        elif "⚠️" in summary:
+            st.warning(summary)
         elif summary:
-            st.warning(summary) if "⚠️" in summary else st.error(summary)
+            st.error(summary)
         if st.button("Clear", key=f"_clear_{state_key}"):
             st.session_state.pop(state_key, None)
             st.rerun()
