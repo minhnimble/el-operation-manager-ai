@@ -454,6 +454,56 @@ async def _delete_stale_slack_data(
     return msg_result.rowcount, wu_result.rowcount
 
 
+async def _count_all_slack_data(
+    target_user_id: str, team_id: str,
+) -> tuple[int, int]:
+    """Return (slack_message_count, work_unit_count) attributed to target.
+
+    Rows are "attributed to target" when SlackMessage.slack_user_id == target
+    (i.e. target is the sender) — matches how the ingester stores rows.
+    """
+    async with AsyncSessionLocal() as db:
+        msg_count = await db.scalar(
+            select(func.count()).select_from(SlackMessage).where(
+                SlackMessage.slack_user_id == target_user_id,
+                SlackMessage.slack_team_id == team_id,
+            )
+        )
+        wu_count = await db.scalar(
+            select(func.count()).select_from(WorkUnit).where(
+                WorkUnit.slack_user_id == target_user_id,
+                WorkUnit.slack_team_id == team_id,
+                WorkUnit.slack_channel_id.is_not(None),
+            )
+        )
+    return msg_count or 0, wu_count or 0
+
+
+async def _purge_all_slack_data(
+    target_user_id: str, team_id: str,
+) -> tuple[int, int]:
+    """Delete every SlackMessage + slack-source WorkUnit row attributed to
+    target. Intended for "wipe and re-sync" flow — the next sync rebuilds
+    rows using the current relevance filter.
+    """
+    async with AsyncSessionLocal() as db:
+        wu_result = await db.execute(
+            delete(WorkUnit).where(
+                WorkUnit.slack_user_id == target_user_id,
+                WorkUnit.slack_team_id == team_id,
+                WorkUnit.slack_channel_id.is_not(None),
+            )
+        )
+        msg_result = await db.execute(
+            delete(SlackMessage).where(
+                SlackMessage.slack_user_id == target_user_id,
+                SlackMessage.slack_team_id == team_id,
+            )
+        )
+        await db.commit()
+    return msg_result.rowcount, wu_result.rowcount
+
+
 # ── GitHub stale-data cleanup (per member) ────────────────────────────────────
 
 async def _current_github_login(
@@ -1873,6 +1923,65 @@ with _tab_member:
                 finally:
                     for k in (_ck_preview, _ck_valid, _ck_confirm):
                         st.session_state.pop(k, None)
+
+    # ── Nuclear option: purge all Slack data for this member ─────────────
+    st.markdown("---")
+    with st.expander("🧨 Purge ALL Slack data for this member (wipe & re-sync)"):
+        st.caption(
+            "Deletes **every** SlackMessage + slack-source WorkUnit row where "
+            "this member is the sender. Use when stored data is out of sync "
+            "with the current relevance filter (sender OR @mentioned) and you "
+            "want a clean rebuild on the next sync. "
+            "Rows where the member was only @mentioned live under the sender's "
+            "id and are **not** touched here."
+        )
+
+        _pk_preview = f"_purge_preview_{_clean_user_id}"
+        _pk_confirm = f"_purge_confirm_{_clean_user_id}"
+
+        if st.button("Preview purge", key=f"preview_purge_{_clean_user_id}"):
+            st.session_state.pop(_pk_confirm, None)
+            try:
+                with st.spinner("Counting rows…"):
+                    all_msg, all_wu = run(
+                        _count_all_slack_data(_clean_user_id, slack_team_id)
+                    )
+                st.session_state[_pk_preview] = (all_msg, all_wu)
+            except Exception as e:
+                st.error(f"Count failed: {e}")
+
+        if _pk_preview in st.session_state:
+            all_msg, all_wu = st.session_state[_pk_preview]
+            if all_msg == 0 and all_wu == 0:
+                st.success("✅ No Slack rows stored for this member.")
+            else:
+                st.warning(
+                    f"Will delete **{all_msg}** message(s) + **{all_wu}** "
+                    "work unit(s) for "
+                    f"**{_clean_selected}**. This cannot be undone."
+                )
+                if not st.session_state.get(_pk_confirm):
+                    if st.button(
+                        f"🧨 Purge {all_msg} message(s) + {all_wu} work unit(s)",
+                        type="primary",
+                        key=f"confirm_purge_{_clean_user_id}",
+                    ):
+                        st.session_state[_pk_confirm] = True
+                        st.rerun()
+                else:
+                    try:
+                        d_msg, d_wu = run(
+                            _purge_all_slack_data(_clean_user_id, slack_team_id)
+                        )
+                        st.success(
+                            f"🗑️ Purged **{d_msg}** message(s) + **{d_wu}** "
+                            "work unit(s). Run a Slack sync to rebuild."
+                        )
+                    except Exception as e:
+                        st.error(f"Purge failed: {e}")
+                    finally:
+                        for k in (_pk_preview, _pk_confirm):
+                            st.session_state.pop(k, None)
 
 st.markdown("---")
 
