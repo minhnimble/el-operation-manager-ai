@@ -8,7 +8,7 @@ Standup handling covers two common bot patterns:
   1. Bot posts question top-level; users reply in-thread with their own account.
      → Thread replies have a real `user` field — captured via conversations.replies.
   2. Bot collects answers privately then re-posts them as bot_messages with the
-     user's full name as the `username` override (e.g. Geekbot style).
+     user's full name as the `username` override (e.g. Standuply style).
      → We match `username` against TeamMember / User display names to attribute
        the message to the correct Slack user ID.
 """
@@ -648,7 +648,7 @@ class SlackIngester:
                     replies.append(reply)
                 return replies
 
-            # ── Bot-posted standup summaries (Geekbot-style) ─────────────────
+            # ── Bot-posted standup summaries (Standuply-style) ───────────────
             if subtype == "bot_message" and is_standup:
                 bot_username = (
                     msg.get("username")

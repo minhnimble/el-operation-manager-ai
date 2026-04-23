@@ -148,7 +148,7 @@ async def build_work_report(
     def _extract_sender(payload: dict) -> tuple[str | None, str | None]:
         """Return (sender_user_id, sender_display_name) from a Slack payload.
 
-        Bot reposts (Geekbot etc.) don't have a real `user` field — the bot
+        Bot reposts (Standuply etc.) don't have a real `user` field — the bot
         posts under the user's name via `username` / `user_profile`. For those
         we surface the display name instead.
         """

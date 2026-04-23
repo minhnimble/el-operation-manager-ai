@@ -6,7 +6,7 @@ Turns Slack + GitHub activity into structured work analytics for Engineering Man
 
 ## What It Does
 
-- **Slack activity** — pulls messages from public and private channels you're in, including standup bots (Geekbot-style)
+- **Slack activity** — pulls messages from public and private channels you're in, including standup bots (Standuply-style)
 - **GitHub activity** — PRs (created + reviewed) cross-org via Search API + PAT, with optional per-repo deep mode for commits/issues
 - **Team management** — add engineers to your roster; they don't need to sign in
 - **Batch sync** — sync yourself, your whole team, or any subset at once with per-member progress
@@ -82,14 +82,7 @@ usergroups:read        — resolve @subteam mentions to group handles
 | `repo` | Read PRs, reviews, commits in private + public repos |
 | `read:org` | Cross-org Search API visibility (needed for Overview-mode sync) |
 
-**b. Copy the token** (`ghp_…` or `github_pat_…`). Two ways to provide it:
-
-| Method | Where | When to use |
-|---|---|---|
-| **Env var / Streamlit secret** *(recommended)* | `GITHUB_PAT=ghp_...` in `.env` or Streamlit secrets | Single-tenant deploy. Never touches the DB. Rotate by updating the secret + reboot. |
-| **Per-user PAT in DB** | Paste on **Connect Accounts** page after deploy | Multi-tenant or per-user override. Stored in `user_github_links.github_access_token`. |
-
-Resolution order at sync time: env var → per-user DB PAT → fail. One PAT covers the whole team.
+**b. Copy the token** (`ghp_…` or `github_pat_…`) and set it as `GITHUB_PAT` in `.env` or Streamlit secrets. The PAT is never stored in the database — rotate by updating the secret and rebooting. One PAT covers the whole team.
 
 ### 3. Deploy to Streamlit Cloud
 
@@ -129,9 +122,8 @@ DATABASE_URL = "postgresql+asyncpg://postgres.xxxx:[password]@aws-0-us-east-1.po
 SLACK_CLIENT_ID     = "..."
 SLACK_CLIENT_SECRET = "..."
 
-# GitHub PAT — recommended path. Single token for the whole team.
-# Required scopes: repo + read:org. Leave blank to fall back to per-user
-# PATs pasted on the Connect Accounts page.
+# GitHub PAT — single token for the whole team. Required.
+# Required scopes: repo + read:org.
 GITHUB_PAT = "ghp_..."
 
 ANTHROPIC_API_KEY = "sk-ant-..."
@@ -168,9 +160,9 @@ Click **Reboot app** after saving.
 
 Go to **🔗 Connect Accounts** → **Sign in with Slack**.
 
-For GitHub: paste your **Personal Access Token (PAT)** in the GitHub section and click **Connect GitHub**. The app validates the PAT against `/user`, stores it in the DB, and uses it for all subsequent GitHub queries. Use **Update / rotate PAT** to swap in a new token.
+GitHub uses a single server-wide PAT configured via the `GITHUB_PAT` env var / Streamlit secret — no PAT is pasted in the UI and none is stored in the DB. The Connect page only validates the server PAT and links your GitHub handle so sync can query your PRs/reviews.
 
-> One PAT covers the whole team. The token must have `repo` + `read:org` scopes for cross-org Search API access.
+> One PAT covers the whole team. Required scopes: `repo` + `read:org` (for cross-org Search API access).
 
 ### 2. Build Your Team
 
@@ -195,13 +187,11 @@ The sync runs in the background — switch pages freely and come back to see pro
 
 Overview mode uses the **GitHub Search API** with your **Personal Access Token (PAT)** to pull everything the member did in any org your PAT has visibility into — even repos you've never indexed. Skips commits (commit-search is heavily rate-limited on GitHub's side).
 
-**Token resolution** (per member, in order):
-1. **`GITHUB_PAT` env/secret** + member's `github_login` (recommended)
-2. **Manager's DB-stored PAT** (Connect page) + member's `github_login` (legacy)
-3. **Member's own DB-stored PAT** + login (fallback)
-4. Skip if none available
+**Token resolution** (per member):
+1. `GITHUB_PAT` env/secret + member's stored `github_login` → sync.
+2. Either missing → skip.
 
-Set the member's GitHub handle in **Team Overview**. Either set `GITHUB_PAT` in env/secrets (best), or paste a PAT in **Connect Accounts**. One PAT covers the whole team.
+No DB-stored PAT path. Set `GITHUB_PAT` in env/secrets and each member's handle in **Team Overview**.
 
 **Date range** maps directly to the overview URL:
 `from=sync_start.date()` `to=sync_end.date()` (or "now" if open-ended).
@@ -212,7 +202,7 @@ Set the member's GitHub handle in **Team Overview**. Either set `GITHUB_PAT` in 
 |---|---|
 | Syncing **yourself** | All messages from all joined channels |
 | Syncing a **team member** | Only messages **sent by** or **@mentioning** that member |
-| **Standup bot** (Geekbot-style) | Bot's `username` matched to member's display name |
+| **Standup bot** (Standuply-style) | Bot's `username` matched to member's display name |
 
 **Ignored channels** (always skipped): `nimble-*`, `*-activity`, `*-corner`, `ic-*`, and a few exact names.
 
@@ -230,14 +220,24 @@ Go to **📊 Work Report**, select a member, choose a date range, and click **Ge
 
 ### Developer Track (Google Sheets)
 
-Shows each member's skill-vetting progress in the Work Report. Cell background colors drive status (green = vetted, blue = in progress, purple = proposed, yellow = focus, white = not started); cell notes render inline.
+Shows each member's skill-vetting progress in the Work Report. Cell background colors drive status:
 
-**Sheet format** — one tab per person. The tab name must share a token (≥3 chars) with the member's Slack **display name**, **real name**, or **email local-part** (e.g. `don.vo@…` → `Don Vo`), so first name, last name, or full name all work. Column A = integer level, column B = level title, columns C+ = skills.
+| Swatch | Color  | Status       |
+|--------|--------|--------------|
+| 🟢     | green  | vetted       |
+| 🔵     | blue   | in progress  |
+| 🟣     | purple | proposed     |
+| 🟡     | yellow | focus        |
+| ⚪     | white  | not started  |
 
-| Col A | Col B                         | Col C — skills | Col D — skills |
-|-------|-------------------------------|----------------|----------------|
-| `3`   | Junior Software Developer     | *skill text*   | *skill text*   |
-| `4`   | Mid-senior Software Developer | *skill text*   | *skill text*   |
+Cell notes render inline.
+
+**Sheet format** — one tab per person. The tab name must share a token (≥3 chars) with the member's Slack **display name**, **real name**, or **email local-part** (e.g. `don.vo@…` → `Don Vo`), so first name, last name, or full name all work. Column A = integer level, column B = level title, column C = Technical skills, column D = Soft skills.
+
+| Col A | Col B                         | Col C — Technical skills | Col D — Soft skills |
+|-------|-------------------------------|--------------------------|---------------------|
+| `3`   | Junior Software Developer     | *skill text*             | *skill text*        |
+| `4`   | Mid-senior Software Developer | *skill text*             | *skill text*        |
 
 **Setup:**
 
@@ -308,7 +308,7 @@ The ingester handles two patterns:
 
 **Thread replies** — member replies to a bot's top-level post with their own account. Captured via `conversations.replies`.
 
-**Bot-reposted summaries** (Geekbot-style) — bot reposts each member's standup as a `bot_message` with `username` set to the member's full name. The ingester matches this against the team roster (case-insensitive). The member must be in **Team Overview** with a matching display name.
+**Bot-reposted summaries** (Standuply-style) — bot reposts each member's standup as a `bot_message` with `username` set to the member's full name. The ingester matches this against the team roster (case-insensitive). The member must be in **Team Overview** with a matching display name.
 
 ---
 
@@ -341,8 +341,7 @@ APP_BASE_URL=https://localhost:8501
 SLACK_CLIENT_ID=...
 SLACK_CLIENT_SECRET=...
 
-# GitHub PAT (recommended). Required scopes: repo + read:org.
-# Leave blank to fall back to per-user PATs pasted in the Connect page.
+# GitHub PAT — required. Required scopes: repo + read:org.
 GITHUB_PAT=ghp_...
 
 ANTHROPIC_API_KEY=sk-ant-...
@@ -377,7 +376,7 @@ streamlit run streamlit_app.py \
   --server.sslKeyFile .certs/localhost-key.pem
 ```
 
-Set the Slack OAuth redirect URL to `https://localhost:8501`. GitHub needs no redirect — paste your PAT in the Connect page.
+Set the Slack OAuth redirect URL to `https://localhost:8501`. GitHub needs no redirect — the `GITHUB_PAT` env var is used directly.
 
 ---
 
@@ -386,7 +385,7 @@ Set the Slack OAuth redirect URL to `https://localhost:8501`. GitHub needs no re
 ```
 streamlit_app.py               # Main UI + OAuth callback handler
 pages/
-├── 1_Connect.py               # Slack OAuth + GitHub PAT linking
+├── 1_Connect.py               # Slack OAuth + GitHub handle linking
 ├── 2_Work_Report.py           # Work reports — charts, feed, share summary
 ├── 3_Team_Overview.py         # Team management — add/remove/edit members
 ├── 4_Sync.py                  # Slack + GitHub sync with background progress
@@ -401,7 +400,7 @@ app/
 ├── ai/                        # Claude-powered classification + insights
 ├── integrations/              # Google Sheets + Notion async clients
 ├── slack/                     # OAuth flow + workspace user listing
-└── github/                    # PAT validation + user linking (oauth.py)
+└── github/                    # GitHub handle validation + user linking (oauth.py)
 ```
 
 ---
@@ -420,6 +419,6 @@ ENABLE_ORG_ANALYTICS=false     # Not yet implemented
 
 - Only channels the EM has joined are synced
 - For team member syncs, only that member's messages are stored
-- GitHub access uses a PAT you paste yourself; revoke it any time at github.com/settings/tokens
+- GitHub access uses a single server-wide PAT set via `GITHUB_PAT` env/secret; never stored in the DB. Revoke any time at github.com/settings/tokens.
 - All data stays in your own database
 - Team members can be removed at any time
