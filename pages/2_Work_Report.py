@@ -132,6 +132,16 @@ def _format_standup_body(text: str) -> str:
         text,
     )
 
+    # Fallback for emoji separators encoded as Slack shortcodes (e.g.
+    # ``:face_with_monocle:``) instead of unicode glyphs.  We still split
+    # only where a sentence-ending punctuation + shortcode introduces the
+    # trailing free-text answer, and stop at the first bullet or end.
+    text = re.sub(
+        r"([.\)\!\?][\s\u00a0]+:[A-Za-z0-9_+-]{2,}:[\s\u00a0]+)([^\s\u00a0•][^•]*?)(?=[\s\u00a0]*(?:•|$))",
+        r"\1<br>\2",
+        text,
+    )
+
     # Also break before a short capitalized-label segment that lives
     # *inside* a bullet, e.g. ``• … on JB Android. EL:`` where ``EL:``
     # announces the next project before the next ``•``.  Label is
