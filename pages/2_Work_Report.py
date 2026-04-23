@@ -47,7 +47,10 @@ def _format_standup_body(text: str) -> str:
     """Format standup message text for readable display.
 
     Standup bot messages use Slack mrkdwn: bold question headers are wrapped
-    in *...* and bullet answers follow as inline • sequences.
+    in *...* and answer bullets follow as inline ``•`` (top-level) and
+    ``◦`` (sub-bullet) sequences.  Because Slack stores these with real
+    newlines in some clients and as a single flowed line in others, we
+    normalise first and then split deterministically.
 
     Strategy:
       1. Normalise existing newlines to spaces so both stored formats are
@@ -55,8 +58,13 @@ def _format_standup_body(text: str) -> str:
       2. Insert a paragraph break (\\n\\n) before each *bold section* that
          follows non-whitespace content — this separates answer bullets from
          the next question header without breaking inside the header itself.
-      3. Convert inline bullet sequences to one bullet per soft line break
-         (markdown '  \\n') so they stay visually grouped with their header.
+      3. Convert inline ``•`` sequences to one bullet per soft markdown line
+         break so they stay visually grouped with their header.
+      4. Convert inline ``◦`` sub-bullets the same way, but indented with a
+         run of non-breaking spaces so they visually nest under the
+         preceding ``•``.  Plain ASCII spaces would work in raw markdown but
+         get collapsed to a single space by HTML rendering after the ``<br>``
+         that ``  \\n`` produces — U+00A0 survives.
     """
     import re
 
@@ -72,8 +80,13 @@ def _format_standup_body(text: str) -> str:
     # Uses negative lookbehind so we don't double-insert on already-split text
     text = re.sub(r"(\S) +(\*\S)", lambda m: m.group(1) + "\n\n" + m.group(2), text)
 
-    # Step 3: one bullet per line (soft markdown line break '  \n')
+    # Step 3: one top-level bullet per line (soft markdown line break '  \n')
     text = re.sub(r" *• +", "  \n• ", text)
+
+    # Step 4: one sub-bullet per line, indented under the parent. U+00A0 is a
+    # non-breaking space — ASCII leading spaces after a <br> collapse in HTML.
+    _SUB_INDENT = "\u00A0" * 4
+    text = re.sub(r" *◦ +", f"  \n{_SUB_INDENT}◦ ", text)
 
     return text.strip()
 
