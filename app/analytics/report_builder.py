@@ -115,13 +115,39 @@ async def build_work_report(
         if row.channel_id and row.channel_name
     }
 
-    # Fetch recent activity for the feed (most recent 100, all types)
-    activity_result = await db.execute(
+    # ── Activity feed ─────────────────────────────────────────────────────────
+    # The single-query / limit(100) approach used to be a footgun for power
+    # users: someone with hundreds of PR reviews would see their entire feed
+    # filled with GitHub items, leaving 5–10 slots for Slack standups and
+    # discussions — even though the header counters reported the true totals.
+    #
+    # Slack content is small (~bytes per row) and is the primary thing humans
+    # actually read in the report, so we fetch it without a limit. GitHub
+    # activity can run into the thousands for active reviewers, so we keep a
+    # generous cap that's high enough to make the per-category PR expanders
+    # (Created / Merged / Reviewed) match the header counts in practice.
+    GITHUB_ACTIVITY_LIMIT = 1000
+
+    slack_activity_result = await db.execute(
         select(WorkUnit).where(
             *base_filter,
-        ).order_by(WorkUnit.timestamp.desc()).limit(100)
+            WorkUnit.source == WorkUnitSource.SLACK,
+        ).order_by(WorkUnit.timestamp.desc())
     )
-    activity_units = activity_result.scalars().all()
+    github_activity_result = await db.execute(
+        select(WorkUnit).where(
+            *base_filter,
+            WorkUnit.source == WorkUnitSource.GITHUB,
+        ).order_by(WorkUnit.timestamp.desc()).limit(GITHUB_ACTIVITY_LIMIT)
+    )
+    # Merge and re-sort so the page can keep its existing
+    # "newest first, filter by source" rendering logic unchanged.
+    activity_units = sorted(
+        list(slack_activity_result.scalars().all())
+        + list(github_activity_result.scalars().all()),
+        key=lambda wu: wu.timestamp,
+        reverse=True,
+    )
 
     # ── Enrich Slack items with sender + file attachments ─────────────────────
     # We persist the SlackMessage row's slack_user_id as the *target* of the
