@@ -445,31 +445,69 @@ with sync_cols[1]:
     )
 
 if sync_one:
+    # `st.status` gives a live, phase-aware indicator: write → refresh →
+    # done. Without it, the sync write shows a spinner but the subsequent
+    # _fetch_plans() re-hits Notion + Sheets silently, leaving the user
+    # staring at an unchanging page.
     try:
-        with st.spinner(f"Syncing {selected_plan.dev_name}…"):
+        with st.status(
+            f"Syncing {selected_plan.dev_name}…", expanded=True
+        ) as status:
+            status.write("📝 Writing changes to Google Sheet…")
             result = _run_async(
                 apply_sync_plan(settings.dev_track_sheet_id, selected_plan)
             )
+            if result.error:
+                status.write(f"⚠️ {result.error}")
+            else:
+                status.write(
+                    f"✅ Wrote {result.cells_updated} cell(s) · "
+                    f"Focus Areas +{result.focus_areas_added} "
+                    f"−{result.focus_areas_removed}"
+                )
+            status.update(label="🔄 Refreshing preview from Notion + Sheet…")
+            _fetch_plans()
+            status.update(
+                label=f"Sync complete for {selected_plan.dev_name}",
+                state="complete",
+            )
         st.session_state[_RESULTS_KEY] = [result]
-        # Re-fetch so the next preview reflects the freshly written state.
-        _fetch_plans()
         st.rerun()
     except Exception as e:
         st.error(f"Sync failed: {type(e).__name__}: {e}")
 
 if sync_all:
-    progress = st.progress(0.0, text="Starting…")
-
-    def _on_progress(done: int, total: int) -> None:
-        pct = done / total if total else 1.0
-        progress.progress(pct, text=f"Synced {done}/{total}")
-
     try:
-        results = _run_async(
-            apply_all(settings.dev_track_sheet_id, plans, _on_progress)
-        )
+        with st.status(
+            f"Syncing {len(_actionable)} member(s)…", expanded=True
+        ) as status:
+            progress = st.progress(0.0, text="Starting…")
+
+            def _on_progress(done: int, total: int) -> None:
+                pct = done / total if total else 1.0
+                progress.progress(pct, text=f"Synced {done}/{total}")
+
+            results = _run_async(
+                apply_all(settings.dev_track_sheet_id, plans, _on_progress)
+            )
+            ok = sum(1 for r in results if not r.error)
+            failed = len(results) - ok
+            cells_total = sum(r.cells_updated for r in results)
+            fa_add_total = sum(r.focus_areas_added for r in results)
+            fa_rm_total = sum(r.focus_areas_removed for r in results)
+            status.write(
+                f"✅ {ok}/{len(results)} member(s) synced · "
+                f"{cells_total} cell(s) · Focus Areas "
+                f"+{fa_add_total} −{fa_rm_total}"
+                + (f" · ⚠️ {failed} failed" if failed else "")
+            )
+            status.update(label="🔄 Refreshing preview from Notion + Sheet…")
+            _fetch_plans()
+            status.update(
+                label=f"Sync complete ({ok}/{len(results)})",
+                state="complete" if failed == 0 else "error",
+            )
         st.session_state[_RESULTS_KEY] = results
-        _fetch_plans()
         st.rerun()
     except Exception as e:
         st.error(f"Sync failed: {type(e).__name__}: {e}")
