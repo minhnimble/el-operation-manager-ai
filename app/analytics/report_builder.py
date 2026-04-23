@@ -18,6 +18,7 @@ from app.ai.schemas import WorkReport, StandupExtraction
 from app.ai.work_extractor import WorkExtractor
 from app.ai.insight_generator import InsightGenerator
 from app.config import get_settings
+from app.ui.time_format import to_gmt7
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -240,7 +241,13 @@ async def build_work_report(
                 or wu.slack_channel_id
                 or ""
             ),
-            "timestamp": wu.timestamp.strftime("%b %d, %Y %H:%M"),
+            # 24-hour clock, GMT+7 — users read reports in local time.
+            "timestamp": to_gmt7(wu.timestamp).strftime("%b %d, %Y %H:%M"),
+            # Keep the raw datetime alongside the pre-formatted display string.
+            # The page-level sorting in PR expanders needs chronological order,
+            # and sorting "%b %d, %Y %H:%M" strings orders months alphabetically
+            # (Apr < Aug < Dec < Feb ...), which scrambles cross-month data.
+            "timestamp_dt": wu.timestamp,
             "slack_message_ts": wu.slack_message_ts or "",
             "sender_id": None,
             "sender_name": None,

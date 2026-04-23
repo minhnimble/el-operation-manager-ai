@@ -912,9 +912,16 @@ def _render_pr_links(label: str, items: list, icon: str) -> None:
     # De-dupe by URL base first — pr_review entries are per-review, collapse
     # to per-PR. Count the unique PRs so the expander header matches the
     # rendered list (otherwise "Reviewed (40)" shows 6 rows after dedupe).
+    #
+    # Sort by the raw datetime (timestamp_dt), not the pre-formatted display
+    # string. The display string ("%b %d, %Y %H:%M") sorts month names
+    # alphabetically, which puts April before February and scrambles any feed
+    # that crosses month boundaries.
+    from datetime import datetime
+    _MIN_DT = datetime.min
     seen: set[str] = set()
     unique: list = []
-    for it in sorted(items, key=lambda x: x.get("timestamp") or "", reverse=True):
+    for it in sorted(items, key=lambda x: x.get("timestamp_dt") or _MIN_DT, reverse=True):
         url = it.get("url") or ""
         key = url.split("#")[0] if url else (it.get("title") or "")
         if key in seen:
@@ -979,6 +986,15 @@ with st.expander(f"Standups ({len(standups)})", expanded=len(standups) > 0):
     if not standups:
         st.info("No standup messages in this period.")
     else:
+        # Newest-first on the raw datetime — same rationale as Slack Messages
+        # below: don't depend on upstream ordering remaining stable.
+        from datetime import datetime as _standup_dt
+        _STANDUP_MIN_DT = _standup_dt.min
+        standups = sorted(
+            standups,
+            key=lambda it: it.get("timestamp_dt") or _STANDUP_MIN_DT,
+            reverse=True,
+        )
         for _i, item in enumerate(standups):
             ts      = item["timestamp"]
             sender  = _format_sender(item, _user_map)
@@ -1047,11 +1063,24 @@ with st.expander(f"Slack Messages ({len(other_slack)})", expanded=False):
         st.markdown("---")
 
         # ── Group by channel ──────────────────────────────────────────────────
+        # Messages should land newest-first inside each channel card.  We
+        # can't trust input order alone — thread-reply merging upstream can
+        # interleave older replies after their newer siblings — so sort each
+        # bucket explicitly on the raw datetime after grouping.  Falls back
+        # to datetime.min when timestamp_dt is missing so incomplete rows
+        # sink to the bottom of a desc sort instead of raising TypeError.
         from collections import defaultdict
+        from datetime import datetime as _dt
+        _SLACK_MIN_DT = _dt.min
         _by_channel: dict[str, list[dict]] = defaultdict(list)
         for _item in other_slack:
             _ch_key = _item.get("channel_name") or _item.get("slack_channel_id") or "unknown"
             _by_channel[_ch_key].append(_item)
+        for _bucket in _by_channel.values():
+            _bucket.sort(
+                key=lambda it: it.get("timestamp_dt") or _SLACK_MIN_DT,
+                reverse=True,
+            )
 
         _msg_idx = 0
         for _ch_name, _msgs in sorted(_by_channel.items()):
