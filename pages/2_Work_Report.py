@@ -101,47 +101,33 @@ def _format_standup_body(text: str) -> str:
 
     text = re.sub(r"(\S) +(\*\S)", lambda m: m.group(1) + "\n\n" + m.group(2), text)
 
-    # Break the inline answer onto its own line, right under the question
-    # header.  Standuply reposts each question trailing with a signature
-    # emoji — 🖖 (yesterday), 🧑‍🍳 (today), 🧐 (blockers) — followed by
-    # either a label like ``JB:`` / ``EL:`` or a free answer like
-    # ``All good`` before the first bullet (or end-of-body).  Without
-    # this break the answer hugs the emoji on the same visual line as
-    # the question, which is hard to scan.
-    #
-    # Keyed off the emoji instead of Slack bold markers because the
-    # stored payload may or may not carry ``*…*`` — the emojis are the
-    # reliable anchor.
-    #
-    # Non-greedy ``[^•]+?`` with the lookahead ``\s*(?:•|$)`` ensures we
-    # stop at the *first* bullet (or end-of-body) — not the last —
-    # otherwise a stray ``:`` mid-bullet (e.g. ``… on JB Android. EL:``)
-    # would be swept in.
     # Break the inline answer onto its own line, right under the
-    # question header.  Standuply reposts each question trailing with
-    # a signature emoji (🖖 / 🧑‍🍳 / 🧐) followed by a label like
-    # ``JB:`` / ``EL:`` or a free answer like ``All good``.  Without
-    # this break the answer hugs the emoji on the same visual line as
-    # the question.
+    # question header.  Standuply appends a signature emoji (🖖 / 🧑‍🍳
+    # / 🧐) to each question, followed by a label (``JB:`` / ``EL:``)
+    # or a free answer (``All good``) before the first bullet or
+    # end-of-body.  Without this break the answer hugs the emoji on
+    # the same visual line as the question.
     #
-    # Earlier attempts enumerated the specific emoji codepoints, but
-    # stored payloads vary: variation selectors (``\ufe0f``) or ZWJ
-    # sequences silently broke a literal match, and Standuply's emoji
-    # set drifts over time.  Instead anchor on *any non-ASCII glyph
-    # run* (``[^\\x00-\\x7f]…``) — emojis are non-ASCII, ordinary
-    # English question text is ASCII, so the first non-ASCII run after
-    # the header is reliably the question-mark emoji.
+    # Anchor is *any non-ASCII glyph run excluding bullet glyphs*
+    # (``[^\\x00-\\x7f•◦]…``).  Enumerating specific emoji codepoints
+    # failed because stored payloads carry variation selectors
+    # (``\ufe0f``) and ZWJ sequences that broke literal matches, and
+    # Standuply's emoji set drifts.  Non-ASCII run + bullet exclusion
+    # reliably isolates the question-mark emoji regardless of codepoint.
     #
-    # Answer run is constrained to ``[A-Z][^•]*?`` (non-greedy, up to
-    # the first bullet) so the break lands on a label/sentence start,
-    # not inside the emoji itself.
+    # Answer start is ``[^\\s\u00a0•]`` — any non-space, non-bullet
+    # char — so a leading ``*bold*`` wrapper (``*All good*``) or a
+    # lowercase sentence still anchors the break.
     #
-    # Separator class is ``[\\s\u00a0]`` because Python's default ``\s``
-    # does not include U+00A0 (non-breaking space) and Slack sometimes
-    # emits NBSP between the emoji and the label.  Non-raw pattern so
-    # ``\u00a0`` resolves to the actual NBSP codepoint.
+    # Non-greedy ``[^•]*?`` + lookahead ``[\\s\u00a0]*(?:•|$)`` stops
+    # at the first bullet or end-of-body, so a mid-bullet ``: `` never
+    # gets swept in.
+    #
+    # Separator class includes U+00A0: Python's default ``\s`` excludes
+    # NBSP and Slack sometimes emits NBSP between emoji and label.
+    # Non-raw pattern so ``\u00a0`` resolves to the real codepoint.
     text = re.sub(
-        "([^\\x00-\\x7f•◦][^\\s\u00a0\\x00-\\x7f•◦]*)[\\s\u00a0]+([A-Z][^•]*?)(?=[\\s\u00a0]*(?:•|$))",
+        "([^\\x00-\\x7f•◦][^\\s\u00a0\\x00-\\x7f•◦]*)[\\s\u00a0]+([^\\s\u00a0•][^•]*?)(?=[\\s\u00a0]*(?:•|$))",
         r"\1<br>\2",
         text,
     )
