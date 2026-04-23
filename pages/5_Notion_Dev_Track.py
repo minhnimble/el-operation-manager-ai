@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 import streamlit as st
 
 from app.streamlit_env import load_streamlit_secrets_into_env
+from app.ui.time_format import format_gmt7, format_gmt7_time
 
 load_streamlit_secrets_into_env()
 
@@ -271,7 +272,7 @@ with last_col:
     last_fetch = st.session_state.get(_LAST_FETCH_KEY)
     if last_fetch:
         st.caption(
-            f"Last fetched: {last_fetch.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+            f"Last fetched: {format_gmt7(last_fetch)}"
         )
 
 plans: list[MemberSyncPlan] | None = st.session_state.get(_FETCH_KEY)
@@ -541,7 +542,7 @@ if results:
             "Focus Areas added":  r.focus_areas_added,
             "Focus Areas removed": r.focus_areas_removed,
             "Status":             "❌ " + r.error if r.error else "✅ ok",
-            "At":                 r.timestamp.strftime("%H:%M:%S UTC"),
+            "At":                 format_gmt7_time(r.timestamp),
         })
     st.dataframe(result_rows, use_container_width=True, hide_index=True)
 

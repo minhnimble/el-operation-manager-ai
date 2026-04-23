@@ -1038,8 +1038,8 @@ st.caption("Copy this text to share via Slack, email, or a doc. Click the copy i
 
 
 def _build_share_text(r: "WorkReport") -> str:
-    from datetime import datetime as _dt, timezone as _tz
-    generated = _dt.now(_tz.utc).strftime("%b %d, %Y")
+    from app.ui.time_format import now_gmt7
+    generated = now_gmt7().strftime("%b %d, %Y")
 
     def _pad(label: str, value: int, width: int = 22) -> str:
         dots = "." * max(1, width - len(label))
