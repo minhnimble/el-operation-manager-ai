@@ -764,7 +764,12 @@ if _dt_settings.google_sheets_credentials_json and _dt_settings.dev_track_sheet_
                         st.caption(" · ".join(_summary_parts))
 
                     # Skills grouped by status — progress-first ordering.
+                    # Skip "completed" (vetted) skills: the report focuses on
+                    # what's still in progress or ahead, and the count + header
+                    # already summarise how many have been vetted.
                     for _status in _DT_STATUS_ORDER:
+                        if _status == "completed":
+                            continue
                         _skills_here = [s for s in _lv.skills if s.status == _status]
                         if not _skills_here:
                             continue

@@ -5,14 +5,21 @@ Uses the GitHub REST API v3 with the user's personal OAuth token.
 Stores raw activity into GitHubActivity table.
 """
 
+import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.models.raw_data import GitHubActivity
 from app.models.user import UserGitHubLink
@@ -20,6 +27,36 @@ from app.models.user import UserGitHubLink
 logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE = "https://api.github.com"
+
+
+def _fmt_err(e: BaseException) -> str:
+    """Format an exception for user-facing sync logs.
+
+    ``httpx.HTTPStatusError`` already stringifies with status + URL, which is
+    what we want.  For other exceptions we fall back to ``type: message`` so
+    the log is never just a bare object repr.
+    """
+    if isinstance(e, httpx.HTTPStatusError):
+        return f"{e.response.status_code} {e.response.reason_phrase} on {e.request.url}"
+    if isinstance(e, httpx.HTTPError):
+        return f"{type(e).__name__}: {e}"
+    return f"{type(e).__name__}: {e}"
+
+# HTTP statuses that represent "this resource is unavailable / has no data for
+# this caller" rather than a transient failure.  Retrying them wastes quota and
+# produces confusing RetryError messages for the user, so we treat them as an
+# empty result and move on.
+#
+#   404 — repo not visible to the PAT (private to another org, deleted, etc.)
+#   409 — "Git Repository is empty" (common on /commits for bare doc repos)
+#   410 — repo was deleted
+#   422 — malformed search query (Search API surface)
+_TERMINAL_EMPTY_STATUSES = frozenset({404, 409, 410, 422})
+
+# Upper bound on any single rate-limit wait. GitHub's hourly reset can be up
+# to an hour away, and blocking a Streamlit sync for that long is worse than
+# surfacing the error to the user — they can rerun later.
+_MAX_RATE_LIMIT_WAIT_SECONDS = 60
 
 
 class GitHubIngester:
@@ -38,13 +75,91 @@ class GitHubIngester:
     async def close(self) -> None:
         await self._client.aclose()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=1, max=10),
+        # reraise=True so callers see the real HTTPStatusError (with status +
+        # URL in the message) instead of tenacity's opaque
+        # "RetryError[<Future ... raised HTTPStatusError>]" wrapper.
+        reraise=True,
+        # Only retry on transient network / 5xx errors. Terminal 4xx (404,
+        # 409, 410, 422) are handled inline below and never raise, so they
+        # never reach tenacity. Rate-limit is handled inline with an explicit
+        # sleep, then we raise a RuntimeError to trigger a retry.
+        retry=retry_if_exception_type((httpx.HTTPError, RuntimeError)),
+    )
     async def _get(self, path: str, params: dict | None = None) -> Any:
         resp = await self._client.get(path, params=params or {})
-        if resp.status_code == 422:
+
+        # ── Terminal "no data" statuses — don't retry, don't raise ──────────
+        # These repos/queries can't be satisfied for this PAT (missing, empty,
+        # or deleted). Returning [] lets the pagination / caller code treat
+        # them as "no results" without burning retry attempts and without
+        # polluting the sync log with scary-looking RetryError messages.
+        if resp.status_code in _TERMINAL_EMPTY_STATUSES:
+            logger.debug(
+                "GitHub %s on %s — treated as empty (%s)",
+                resp.status_code, resp.url, resp.reason_phrase,
+            )
             return []
+
+        # ── Rate limiting ────────────────────────────────────────────────────
+        # GitHub uses two distinct mechanisms:
+        #   • Primary   — 403 with x-ratelimit-remaining: 0, reset via
+        #                 x-ratelimit-reset (unix timestamp).
+        #   • Secondary — 403 or 429 with a Retry-After header (seconds).
+        # Both need an actual sleep, not blind exponential backoff.
+        if resp.status_code in (403, 429):
+            wait_s = self._rate_limit_wait_seconds(resp)
+            if wait_s is not None:
+                logger.warning(
+                    "GitHub rate limit on %s — sleeping %ds before retry",
+                    path, wait_s,
+                )
+                await asyncio.sleep(wait_s)
+                # Raise so tenacity drives the retry loop; message is only
+                # used if we exhaust attempts, in which case the user gets a
+                # readable error.
+                raise RuntimeError(
+                    f"GitHub rate limit on {path} (slept {wait_s}s) — retrying"
+                )
+            # Non-rate-limit 403 (SAML SSO enforcement, blocked org, token
+            # missing scope). Treat as terminal: skip this resource rather
+            # than retrying something that will never succeed.
+            logger.warning(
+                "GitHub 403 on %s (%s) — skipping: %s",
+                path, resp.url, (resp.text or "")[:200],
+            )
+            return []
+
         resp.raise_for_status()
         return resp.json()
+
+    @staticmethod
+    def _rate_limit_wait_seconds(resp: httpx.Response) -> int | None:
+        """Return the number of seconds to sleep for a rate-limit response,
+        or ``None`` if this 403/429 isn't actually a rate-limit response.
+
+        Capped at :data:`_MAX_RATE_LIMIT_WAIT_SECONDS` so a badly-timed sync
+        doesn't block on a full-hour reset window.
+        """
+        retry_after = resp.headers.get("retry-after")
+        if retry_after:
+            try:
+                return min(max(int(retry_after), 1), _MAX_RATE_LIMIT_WAIT_SECONDS)
+            except ValueError:
+                pass  # malformed header — fall through to reset check
+
+        remaining = resp.headers.get("x-ratelimit-remaining")
+        reset = resp.headers.get("x-ratelimit-reset")
+        if remaining == "0" and reset:
+            try:
+                delta = int(reset) - int(time.time()) + 1
+            except ValueError:
+                return None
+            return min(max(delta, 1), _MAX_RATE_LIMIT_WAIT_SECONDS)
+
+        return None
 
     async def _paginate(self, path: str, params: dict | None = None) -> list[dict]:
         results = []
@@ -87,7 +202,7 @@ class GitHubIngester:
             try:
                 items = await self._search_issues(q)
             except Exception as e:
-                logger.warning("Search repos failed (%s): %s", q, e)
+                logger.warning("Search repos failed (%s): %s", q, _fmt_err(e))
                 continue
             for it in items:
                 name = self._repo_full_name_from_url(it.get("repository_url", ""))
@@ -157,7 +272,7 @@ class GitHubIngester:
                 )
                 counts["commits"] += 1
         except Exception as e:
-            logger.warning("Failed commits for %s: %s", repo_name, e)
+            logger.warning("Failed commits for %s: %s", repo_name, _fmt_err(e))
 
         # Pull Requests + Reviews
         try:
@@ -223,7 +338,7 @@ class GitHubIngester:
                     counts["reviews"] += 1
 
         except Exception as e:
-            logger.warning("Failed PRs for %s: %s", repo_name, e)
+            logger.warning("Failed PRs for %s: %s", repo_name, _fmt_err(e))
 
         return counts
 
@@ -265,7 +380,7 @@ class GitHubIngester:
                     )
                     counts["commits"] += 1
             except Exception as e:
-                logger.warning("Failed commits for %s: %s", repo_name, e)
+                logger.warning("Failed commits for %s: %s", repo_name, _fmt_err(e))
 
             # Pull Requests
             try:
@@ -332,7 +447,7 @@ class GitHubIngester:
                         counts["reviews"] += 1
 
             except Exception as e:
-                logger.warning("Failed PRs for %s: %s", repo_name, e)
+                logger.warning("Failed PRs for %s: %s", repo_name, _fmt_err(e))
 
         logger.info(
             "GitHub ingestion complete for %s: %s", self.github_login, counts
@@ -392,7 +507,10 @@ class GitHubIngester:
                 f"is:pr author:{self.github_login} created:{date_range}"
             )
         except Exception as e:
-            logger.warning("Search authored PRs failed for %s: %s", self.github_login, e)
+            logger.warning(
+                "Search authored PRs failed for %s: %s",
+                self.github_login, _fmt_err(e),
+            )
             authored = []
 
         for pr in authored:
@@ -434,7 +552,10 @@ class GitHubIngester:
                 f"updated:{date_range}"
             )
         except Exception as e:
-            logger.warning("Search reviewed PRs failed for %s: %s", self.github_login, e)
+            logger.warning(
+                "Search reviewed PRs failed for %s: %s",
+                self.github_login, _fmt_err(e),
+            )
             reviewed = []
 
         for pr in reviewed:
@@ -445,7 +566,10 @@ class GitHubIngester:
             try:
                 reviews = await self.get_pr_reviews(repo_name, pr_number)
             except Exception as e:
-                logger.warning("get_pr_reviews failed %s#%s: %s", repo_name, pr_number, e)
+                logger.warning(
+                    "get_pr_reviews failed %s#%s: %s",
+                    repo_name, pr_number, _fmt_err(e),
+                )
                 continue
 
             for review in reviews:
