@@ -132,13 +132,26 @@ def _format_standup_body(text: str) -> str:
         text,
     )
 
-    # Also break before a short uppercase-label segment that lives
+    # Also break before a short capitalized-label segment that lives
     # *inside* a bullet, e.g. ``• … on JB Android. EL:`` where ``EL:``
-    # announces the next project before the next ``•``.  Constrained to
-    # 1–5 uppercase/digit chars + ``:`` so it doesn't chew through
-    # ordinary sentences that happen to contain a colon.
+    # announces the next project before the next ``•``.  Label is
+    # defined as 1–10 alnum chars beginning with a capital so it covers
+    # all-caps tags (``EL``, ``CBTL``, ``JB2``) and mixed-case tags
+    # (``Misc``, ``Tomorrow``) without hard-coding specific strings.
     text = re.sub(
-        r"[\s\u00a0]+([A-Z][A-Z0-9]{0,4}:)(?=[\s\u00a0]*•)",
+        r"[\s\u00a0]+([A-Z][A-Za-z0-9]{0,9}:)(?=[\s\u00a0]*•)",
+        r"<br>\1",
+        text,
+    )
+
+    # Same label shape but *no trailing bullet* — the labels live inside
+    # the final bullet of the message, separated from the preceding
+    # clause only by sentence-ending punctuation.  The punctuation
+    # lookbehind (``.`` / ``)`` / ``!`` / ``?``) is what keeps ordinary
+    # colon usage (``Here is a list: apple, banana``) from being
+    # mistaken for a project-label break.
+    text = re.sub(
+        r"(?<=[.\)\!\?])[\s\u00a0]+([A-Z][A-Za-z0-9]{0,9}:)(?=[\s\u00a0])",
         r"<br>\1",
         text,
     )
