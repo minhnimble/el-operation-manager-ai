@@ -52,28 +52,30 @@ def _format_standup_body(text: str) -> str:
     some clients and as a single flowed line in others, so we normalise first
     and then rebuild the structure deterministically.
 
-    Rendering strategy — real nested markdown lists
-      An earlier version tried to emulate bullets with literal ``•`` / ``◦``
-      characters plus soft line breaks and a leading run of U+00A0 for the
-      sub-bullet indent.  That produces correct HTML but Streamlit's theme
-      (and most copy-paste paths) collapses the leading whitespace, so the
-      second-level items visually flattened back against the left margin.
+    Rendering strategy — flat lines with literal bullets
+      We keep Slack's ``•`` / ``◦`` glyphs and split each one onto its own
+      line with a soft markdown line break (``  \\n`` → ``<br>``).  The
+      sub-bullet is prefixed with two non-breaking spaces so it sits just
+      to the right of the ``•`` above it.
 
-      Instead we emit a real Commonmark nested list.  Browsers render nested
-      ``<ul>`` with disc → circle by default, which is exactly the Slack
-      ``•`` → ``◦`` visual we want, and the indentation is handled by the
-      list CSS rather than by fragile leading whitespace.
+      A prior iteration tried real nested ``<ul>`` lists, which rendered
+      with correct indent but introduced Streamlit's loose-list vertical
+      margins between every item — the paragraph-per-``<li>`` spacing made
+      the block feel airy and broken.  A single ``<br>``-separated flow
+      keeps everything tight, which matches how Slack itself renders the
+      original standup.
+
+      Leading ASCII spaces after ``<br>`` get collapsed by HTML, so we use
+      U+00A0 (non-breaking space) for the ``◦`` indent — those survive.
 
     Steps:
       1. Collapse existing newlines to spaces so both stored formats are
          handled consistently.
       2. Insert a paragraph break before each ``*bold header*`` that follows
          content, so the next question starts a new paragraph.
-      3. Turn each ``• `` into a top-level list item (``\\n- ``).
-      4. Turn each ``◦ `` into a nested list item (4-space indent + ``- ``).
-      5. Ensure a blank line precedes the first list item in each paragraph,
-         otherwise Commonmark treats ``text\\n- item`` as a single line and
-         never opens a ``<ul>``.
+      3. Put each ``•`` on its own soft-broken line.
+      4. Put each ``◦`` on its own soft-broken line, indented with two
+         non-breaking spaces so it nests just under the parent ``•``.
     """
     import re
 
@@ -85,10 +87,10 @@ def _format_standup_body(text: str) -> str:
 
     text = re.sub(r"(\S) +(\*\S)", lambda m: m.group(1) + "\n\n" + m.group(2), text)
 
-    text = re.sub(r" *• +", "\n- ", text)
-    text = re.sub(r" *◦ +", "\n    - ", text)
+    text = re.sub(r" *• +", "  \n• ", text)
 
-    text = re.sub(r"(\S)\n- ", r"\1\n\n- ", text)
+    _SUB_INDENT = "\u00A0" * 2
+    text = re.sub(r" *◦ +", f"  \n{_SUB_INDENT}◦ ", text)
 
     return text.strip()
 
