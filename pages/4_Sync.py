@@ -983,10 +983,12 @@ def _run_slack_sync_bg(
                         f"#{ch_name} ({ch_idx + 1}/{len(channels)})"
                     )
                     _jlog(job, f"  📥 #{ch_name}")
-                    # Normal mode only reaches here; standup mode short-circuits
-                    # above. Self-sync stores all messages (filter None) so
-                    # mentions from others land on the EM's own feed too.
-                    mf = None if is_self_m else target_user_id
+                    # Normal mode: always filter to messages the target user
+                    # sent OR is @mentioned in — same rule for self and for
+                    # any other member. `_is_relevant` covers both cases when
+                    # `filter_user_id` is set, so self no longer dumps every
+                    # message in every joined channel into the DB.
+                    mf = target_user_id
                     count, err, unresolved = _run(_sync_slack_channel(
                         access_token, slack_team_id, slack_user_id,
                         ch_id, ch_name, oldest, latest=latest,
