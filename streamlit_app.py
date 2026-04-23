@@ -117,11 +117,12 @@ st.caption("Slack + GitHub activity intelligence for engineering leaders.")
 
 st.markdown("---")
 
-col1, col2, col3, col4 = st.columns(4)
-col1.page_link("pages/1_Connect.py",       label="🔗 Connect Accounts", use_container_width=True)
-col2.page_link("pages/2_Work_Report.py",   label="📊 Work Report",      use_container_width=True)
-col3.page_link("pages/3_Team_Overview.py", label="👥 Team Overview",    use_container_width=True)
-col4.page_link("pages/4_Sync.py",          label="🔄 Sync Data",        use_container_width=True)
+col1, col2, col3, col4, col5 = st.columns(5)
+col1.page_link("pages/1_Connect.py",         label="🔗 Connect Accounts",   use_container_width=True)
+col2.page_link("pages/2_Work_Report.py",     label="📊 Work Report",        use_container_width=True)
+col3.page_link("pages/3_Team_Overview.py",   label="👥 Team Overview",      use_container_width=True)
+col4.page_link("pages/4_Sync.py",            label="🔄 Sync Data",          use_container_width=True)
+col5.page_link("pages/5_Notion_Dev_Track.py", label="📋 Notion Dev Track",  use_container_width=True)
 
 st.markdown("---")
 
@@ -137,6 +138,10 @@ st.markdown("""
 - **Classifies work** using Claude AI — surfaces feature work, bug fixes, architecture, mentorship, and incidents from standup text
 - **Generates shareable reports** — metrics, activity feed, AI insights, and a one-click copy summary per team member
 - **Database cleanup tools** — remove data from ignored channels across all users, or clear stale data for removed team members
+- **Notion Dev Track Sync** — pulls per-developer skill tracks from a Notion database and writes status + objective notes back into the Google Sheet snapshot. Preview the diff (cell updates + Focus Areas add/remove) before applying, per-member or bulk.
+- **Focus Areas intent detection** — a skill earns a Focus Areas bullet iff any unchecked to-do reads as active work (V-ing / `In-progress:` / `In-review:`) or pending focus (`New objective:` / `To-review objective:`). Leading adverbs like `Actively raising…` are handled so the V-ing head still counts.
+- **Toggleable-aware Focus Areas writes** — sync detects whether the Notion `## Focus Areas` heading is toggleable and appends bullets in the correct container, positioning them directly under the heading instead of the page bottom.
+- **All user-facing times shown in GMT+7** — "Last fetched", sync result timestamps, and report generation dates. Database stays UTC; conversion happens only at display.
 
 ### Getting started
 
@@ -144,4 +149,5 @@ st.markdown("""
 2. **Team Overview** — add your team members; enter their GitHub handles if they haven't connected OAuth
 3. **Sync Data** — select one or more members (or your whole team at once), pick a date range, and kick off a background sync for Slack and/or GitHub
 4. **Work Report** — generate a report for any team member, browse their activity feed, and copy a summary to share
+5. **Notion Dev Track** — fetch the developer track database, preview per-member diffs, and sync skill status + Focus Areas back into the Google Sheet
 """)

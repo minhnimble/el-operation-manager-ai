@@ -293,15 +293,28 @@ treated as the source of truth; the Sheet is the snapshot.
 - Skills in the Sheet but not in Notion → left untouched (no deletions).
 - Note wording mismatch between Notion and Sheet → Notion's version wins.
 - **Status is derived from objective phrasing** (highest priority first):
-  1. Any unchecked objective uses a V-ing verb ("Working as…", "Raising…") or
-     starts with "In-progress/In-review objective" → **blue** (in progress)
-  2. Any unchecked objective has "New objective:" prefix, no V-ing → **yellow**
-     (focus / ready to start)
+  1. Any unchecked objective uses a V-ing verb ("Working as…", "Raising…") —
+     including an adverb-prefixed form like "Actively raising…" — or starts
+     with "In-progress/In-review objective" → **blue** (in progress)
+  2. Any unchecked objective has "New objective:" or "To-review objective:"
+     prefix → **yellow** (focus / ready to start)
   3. All objectives checked and current Sheet cell is blue or yellow → **white**
      (downgrade to not started)
   4. Current Sheet cell is green (completed) or purple (proposed) → **unchanged**
-- The Notion **Focus Areas** section is kept in sync: in-progress and focus skills
-  are added automatically; skills downgraded to not-started are removed.
+- Focus intent is driven **only** by a skill's to-do items, never by the skill
+  title — skill names describe capabilities in abstract V-ing phrasing
+  regardless of whether the dev is currently focused on them.
+- The Notion **Focus Areas** section is kept in sync: skills with focus intent
+  are added automatically; skills whose to-dos no longer carry focus intent
+  are removed. Bullets are appended inside the heading when it's toggleable,
+  or as siblings directly under the heading when it's a plain `heading_2`
+  (so new bullets never land at the page bottom).
+- **Preview before apply** — the page shows cell updates + Focus Areas
+  add/remove per member; sync is only triggered by explicit per-member or
+  bulk buttons. Failures on one member don't stop the rest.
+- All timestamps on the preview + results page (Last fetched, per-member
+  "At" column) render in **GMT+7**; the app stores timestamps in UTC and
+  converts at display time.
 
 ---
 
